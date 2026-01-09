@@ -60,18 +60,24 @@ C:\Users\Marlon\Desktop\Discord Bot\
 
 ## 🛠 Features
 *   **Voice Activity Detection:** Listens to Discord audio streams.
-*   **Queue System:** Handles multiple speakers one by one to prevent talking over users.
+*   **Parallel Listening & Queue:** Records multiple users simultaneously and processes them in a queue to prevent freezing.
+*   **Text Chat Support:** Reply to mentions and status channel messages.
+*   **Conversation History:** Finn remembers the last 10 messages, allowing for natural follow-up questions.
+*   **Dual Mode Persona:** 
+    *   *Voice:* Short, clear, no emojis (optimized for TTS).
+    *   *Text:* More expressive, uses emojis and formatting.
 *   **Auto-Cleanup:** Deletes temporary `.wav` files in `whisper/` and `tts/` automatically.
-*   **Personality:** defined in `src/config.js` (Funny, casual, "Wegbier" style).
+
 
 ## 📝 Roadmap
 *   [x] Phase 1: Refactoring into `src/` modules.
-*   [ ] Phase 2: Smart Memory (Use LLM to extract facts instead of Regex).
-*   [ ] Phase 3: Better Logging & Error Handling.
-*   [ ] **Phase 4: Advanced Audio & STT:** 
-    *   Fix "getting stuck" issues when multiple people speak.
-    *   Improve Voice Activity Detection (VAD) and queue handling.
-    *   Better transcription quality for overlapping speech.
-*   [ ] **Phase 5: Custom LLM Integration:** 
-    *   Easier switching between different local models (Llama 3, Mistral, etc.).
-    *   Support for other backends if needed (e.g., LM Studio).
+*   [x] Phase 2: Short-Term Memory (Conversation History).
+*   [x] Phase 3: Text Chat & Dual Persona.
+*   [x] Phase 4: Parallel Listening (Fix "Stuck" Bug).
+*   [x] Phase 5: Custom LLM Support (Dolphin-Llama3).
+*   [ ] **Phase 6: Better Voice Quality:** 
+    *   Tweak Coqui TTS settings for more emotion.
+    *   Test alternative local TTS engines.
+*   [ ] **Phase 7: Long-Term Smart Memory:** 
+    *   Use LLM to extract permanent facts (not just Regex).
+

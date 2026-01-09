@@ -37,15 +37,15 @@ const {
 
 // ================= STATE ==================
 let activeConnection = null;
-let speakerQueue = [];
-let activeSpeaker = null;
+const audioPlayer = createAudioPlayer({ behaviors: { noSubscriber: "play" } });
 
-let speechCaptureActive = false;
-let commandLock = false;
-let audioBusy = false;
+// Track who we are currently recording
+const currentlyRecording = new Set(); 
 
-// 🔒 Lock per User
-const userCaptureLock = new Set();
+// Queue for AI processing (Transcribe -> LLM -> TTS -> Play)
+const processingQueue = [];
+let isProcessing = false;
+let isSpeaking = false;
 
 // ================= CLIENT =================
 const client = new Client({
@@ -57,51 +57,88 @@ const client = new Client({
   ]
 });
 
-// ================= AUDIO PLAYER =================
-const audioPlayer = createAudioPlayer({ behaviors: { noSubscriber: "play" } });
-
-audioPlayer.on("stateChange", (oldState, newState) => {
-  if (
-    oldState.status === AudioPlayerStatus.Playing &&
-    newState.status === AudioPlayerStatus.Idle
-  ) {
-    audioBusy = false;
-    commandLock = false;
-    speechCaptureActive = false;
-
-    if (activeSpeaker) {
-      userCaptureLock.delete(activeSpeaker);
-      activeSpeaker = null;
-    }
-
-    cleanupOldFiles(WHISPER_DIR, FILE_CLEANUP_MINUTES);
-    cleanupOldFiles(TTS_DIR, FILE_CLEANUP_MINUTES);
-
-    sendStatus("😏 Finn hat geantwortet.");
-
-    if (activeConnection) {
-      processNextSpeaker(activeConnection.receiver);
-    }
-  }
-});
-
+// ================= STATUS =================
 function sendStatus(text) {
   const ch = client.channels.cache.get(STATUS_CHANNEL_ID);
   if (ch) ch.send(text).catch(() => {});
 }
 
-// ================= LOGIC =================
-function processNextSpeaker(receiver) {
-  if (speechCaptureActive || audioBusy || commandLock) return;
-  if (speakerQueue.length === 0) return;
+// ================= QUEUE PROCESSOR =================
+/**
+ * The Queue Processor handles tasks one-by-one.
+ * A task contains the path to a recorded WAV file and the userId.
+ */
+async function processQueue() {
+  if (isProcessing || processingQueue.length === 0) return;
+  
+  isProcessing = true;
+  const task = processingQueue.shift();
+  const { wavFile, userId } = task;
 
-  const userId = speakerQueue.shift();
-  userCaptureLock.add(userId);
-  activeSpeaker = userId;
-  speechCaptureActive = true;
+  try {
+    // 1. Transcribe
+    const text = await transcribeWithWhisper(wavFile);
+    
+    // Clean up recorded file immediately after transcription
+    fs.unlink(wavFile, () => {});
+
+    if (!text || !isFinnAddressed(text)) {
+      // Not for Finn or empty, next task
+      isProcessing = false;
+      processQueue();
+      return;
+    }
+
+    // 2. Memory & Thinking
+    extractKeyMemory(text, userId);
+    sendStatus("🤖 Finn denkt nach...");
+    const answer = await askFinn(text, userId, "voice");
+
+    // 3. Synthesis
+    const ttsFile = await speakWithCoqui(answer);
+
+    // 4. Wait for Audio Player to be free
+    if (isSpeaking) {
+      sendStatus("⏳ Finn wartet, bis er ausreden darf...");
+      // We push the ready-to-play TTS back to a special priority or just wait
+      // For simplicity: We wait here until audioPlayer is Idle
+      while (isSpeaking) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    // 5. Play
+    isSpeaking = true;
+    audioPlayer.play(createAudioResource(ttsFile));
+
+  } catch (err) {
+    console.error("Queue Processing Error:", err);
+    isProcessing = false;
+    processQueue();
+  }
+}
+
+// ================= AUDIO PLAYER EVENTS =================
+audioPlayer.on("stateChange", (oldState, newState) => {
+  if (newState.status === AudioPlayerStatus.Idle) {
+    isSpeaking = false;
+    isProcessing = false; // Task finished
+    
+    cleanupOldFiles(WHISPER_DIR, FILE_CLEANUP_MINUTES);
+    cleanupOldFiles(TTS_DIR, FILE_CLEANUP_MINUTES);
+    
+    // Check if there is more to do
+    processQueue();
+  }
+});
+
+// ================= RECORDING LOGIC =================
+function startRecordingUser(receiver, userId) {
+  if (currentlyRecording.has(userId)) return;
+  currentlyRecording.add(userId);
 
   const opusStream = receiver.subscribe(userId, {
-    end: { behavior: EndBehaviorType.AfterSilence, duration: 700 }
+    end: { behavior: EndBehaviorType.AfterSilence, duration: 800 }
   });
 
   const pcmStream = opusStream.pipe(
@@ -112,65 +149,42 @@ function processNextSpeaker(receiver) {
   pcmStream.on("data", d => chunks.push(d));
 
   pcmStream.on("end", async () => {
-    speechCaptureActive = false;
-
+    currentlyRecording.delete(userId);
+    
     const buffer = Buffer.concat(chunks);
-    if (buffer.length < 18000) { // Ignore short noises
-      userCaptureLock.delete(userId);
-      processNextSpeaker(receiver);
-      return;
-    }
+    if (buffer.length < 18000) return; // Too short
 
     const wavFile = path.join(WHISPER_DIR, `speech_${Date.now()}_${userId}.wav`);
     writeWavFile(wavFile, buffer);
 
-    try {
-      const text = await transcribeWithWhisper(wavFile);
-      
-      if (!text || !isFinnAddressed(text)) {
-        userCaptureLock.delete(userId);
-        fs.unlink(wavFile, () => {});
-        processNextSpeaker(receiver);
-        return;
-      }
-
-      extractKeyMemory(text, userId);
-
-      commandLock = true;
-      audioBusy = true;
-      sendStatus("🤖 Finn denkt nach…");
-
-      const answer = await askFinn(text, userId);
-      const tts = await speakWithCoqui(answer);
-      audioPlayer.play(createAudioResource(tts));
-
-    } catch (err) {
-      console.error("Processing Error:", err);
-      userCaptureLock.delete(userId);
-      commandLock = false;
-      audioBusy = false;
-      processNextSpeaker(receiver);
-    }
+    // Add to processing queue
+    processingQueue.push({ wavFile, userId });
+    processQueue();
   });
+
+  // Security Timeout: Stop recording after 15 seconds no matter what
+  setTimeout(() => {
+    if (currentlyRecording.has(userId)) {
+      opusStream.destroy();
+    }
+  }, 15000);
 }
 
-function listenForSpeech(connection) {
+// ================= LISTENER =================
+function setupVoiceListeners(connection) {
   connection.subscribe(audioPlayer);
   const receiver = connection.receiver;
 
   receiver.speaking.on("start", userId => {
-    if (userCaptureLock.has(userId)) return;
-    if (speakerQueue.includes(userId)) return;
-
-    speakerQueue.push(userId);
-    processNextSpeaker(receiver);
+    startRecordingUser(receiver, userId);
   });
 }
 
-// ================= COMMANDS =================
-client.on("messageCreate", msg => {
+// ================= BOT COMMANDS =================
+client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
 
+  // 1. Join Voice Command
   if (msg.content.toLowerCase() === "!finn join") {
     const vc = msg.member.voice.channel;
     if (!vc) return;
@@ -181,12 +195,40 @@ client.on("messageCreate", msg => {
       adapterCreator: msg.guild.voiceAdapterCreator
     });
 
-    listenForSpeech(activeConnection);
+    setupVoiceListeners(activeConnection);
     sendStatus("🍻 Finn Wegbier ist im Sprachchat.");
+    return;
+  }
+
+  // 2. Text Chat Logic
+  // Only reply if the bot is mentioned OR we are in the Status Channel (optional)
+  const isMentioned = msg.mentions.has(client.user);
+  const isStatusChannel = msg.channel.id === STATUS_CHANNEL_ID;
+  
+  // You can decide: reply always in status channel, or only when mentioned?
+  // Here: Reply if mentioned OR if name is in text (via isFinnAddressed)
+  if (isMentioned || isFinnAddressed(msg.content) || (isStatusChannel && !msg.content.startsWith("!"))) {
+    
+    // Typing indicator
+    await msg.channel.sendTyping();
+
+    // Memory & Thinking
+    const userId = msg.author.id;
+    const text = msg.content.replace(/<@!?[0-9]+>/g, "").trim(); // Remove mentions
+
+    extractKeyMemory(text, userId);
+    
+    try {
+      const answer = await askFinn(text, userId, "text");
+      msg.reply(answer);
+    } catch (err) {
+      console.error("Text Chat Error:", err);
+      msg.reply("Boah, da ist mir der Geduldsfaden gerissen. Frag nochmal.");
+    }
   }
 });
 
-// ================= START =================
+// ================= READY =================
 client.once(Events.ClientReady, () => {
   sendStatus("🤖 Finn Wegbier ist online.");
   console.log("✅ Finn ist bereit.");

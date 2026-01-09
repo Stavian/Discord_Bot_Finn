@@ -22,8 +22,32 @@ function saveMemory() {
 }
 
 function getUserMemory(userId) {
-  if (!memory[userId]) memory[userId] = { lastUpdated: Date.now() };
+  if (!memory[userId]) {
+    memory[userId] = { 
+      lastUpdated: Date.now(),
+      history: [] // Added conversation history
+    };
+  }
+  if (!memory[userId].history) memory[userId].history = [];
   return memory[userId];
+}
+
+function addHistory(userId, role, content) {
+  const user = getUserMemory(userId);
+  user.history.push({ role, content, time: Date.now() });
+  
+  // Keep only last 10 messages
+  if (user.history.length > 10) {
+    user.history.shift();
+  }
+  saveMemory();
+}
+
+function getHistoryString(userId) {
+  const user = getUserMemory(userId);
+  return user.history
+    .map(h => `${h.role === "user" ? "Nutzer" : "Finn"}: ${h.content}`)
+    .join("\n");
 }
 
 function extractKeyMemory(text, userId) {
@@ -59,5 +83,7 @@ function extractKeyMemory(text, userId) {
 module.exports = {
   memory,
   getUserMemory,
-  extractKeyMemory
+  extractKeyMemory,
+  addHistory,
+  getHistoryString
 };

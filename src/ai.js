@@ -8,10 +8,11 @@ const {
   COQUI_MODEL,
   WHISPER_DIR,
   TTS_DIR,
-  FINN_PERSONALITY_VOICE
+  FINN_VOICE_PROMPT,
+  FINN_TEXT_PROMPT
 } = require("./config");
 const { prepareTextForSpeech } = require("./audio");
-const { memory } = require("./memory");
+const { memory, addHistory, getHistoryString } = require("./memory");
 
 // Ensure directories exist
 fs.mkdirSync(WHISPER_DIR, { recursive: true });
@@ -23,7 +24,7 @@ async function speakWithCoqui(text) {
 
   return new Promise((resolve, reject) => {
     exec(
-      `python -m TTS.bin.synthesize --text "${safeText}" --model_name ${COQUI_MODEL} --out_path "${outWav}"`,
+      `python -m TTS.bin.synthesize --text "${safeText}" --model_name ${COQUI_MODEL} --out_path "${outWav}"`, 
       { env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" } },
       err => (err ? reject(err) : resolve(outWav))
     );
@@ -33,7 +34,7 @@ async function speakWithCoqui(text) {
 function transcribeWithWhisper(wavFile) {
   return new Promise(resolve => {
     exec(
-      `python -m whisper "${wavFile}" --model base --language German --fp16 False --output_format txt --output_dir "${WHISPER_DIR}"`,
+      `python -m whisper "${wavFile}" --model base --language German --fp16 False --output_format txt --output_dir "${WHISPER_DIR}"`, 
       () => {
         const txt = wavFile.replace(".wav", ".txt");
         if (!fs.existsSync(txt)) return resolve(null);
@@ -43,11 +44,22 @@ function transcribeWithWhisper(wavFile) {
   });
 }
 
-async function askFinn(question, userId) {
+async function askFinn(question, userId, mode = "voice") {
   const mem = memory[userId];
-  let ctx = "";
-  if (mem?.name) ctx += `Der Nutzer heißt ${mem.name}. `;
-  if (mem?.games?.length) ctx += `Er spielt gerne ${mem.games.join(", ")}. `;
+  const history = getHistoryString(userId);
+  const systemPrompt = mode === "text" ? FINN_TEXT_PROMPT : FINN_VOICE_PROMPT;
+
+  let userContext = "";
+  if (mem?.name) userContext += `Der Nutzer heißt ${mem.name}. `; 
+  if (mem?.games?.length) userContext += `Er spielt gerne ${mem.games.join(", ")}. `; 
+
+  const fullPrompt = `
+${systemPrompt}
+HINTERGRUND: ${userContext}
+BISHERIGER VERLAUF:
+${history}
+Nutzer: ${question}
+Finn:`
 
   try {
     const res = await fetch(OLLAMA_URL, {
@@ -55,18 +67,20 @@ async function askFinn(question, userId) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: OLLAMA_MODEL,
-        prompt: `${FINN_PERSONALITY_VOICE}\n${ctx}\nFrage:\n${question}`,
+        prompt: fullPrompt,
         stream: false
       })
     });
 
     const raw = await res.text();
-    // Handle potential multiple JSON objects in response stream (even if stream: false is set, some implementations might behave oddly, but here we assume one JSON or standard Ollama behavior)
-    // The original code handled split lines, which suggests ndjson. Standard Ollama non-stream response is a single JSON.
-    // However, keeping original robustness:
-    const lines = raw.trim().split("\n");
-    const last = JSON.parse(lines.pop());
-    return last.response || "";
+    const last = JSON.parse(raw.trim().split("\n").pop());
+    const answer = last.response || "";
+
+    // Update history
+    addHistory(userId, "user", question);
+    addHistory(userId, "finn", answer);
+
+    return answer;
   } catch (error) {
     console.error("Ollama Error:", error);
     return "Äh, mein Gehirn hat gerade einen Aussetzer.";
