@@ -16,7 +16,15 @@ if (fs.existsSync(MEMORY_FILE)) {
 
 function saveMemory() {
   try {
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
+    // Create a copy of memory for saving, excluding conversation history
+    const persistentMemory = {};
+    for (const [userId, data] of Object.entries(memory)) {
+      persistentMemory[userId] = {
+        ...data,
+        history: [] // Do not save conversation history to disk
+      };
+    }
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(persistentMemory, null, 2));
   } catch (error) {
     console.error("Error saving memory:", error);
   }
@@ -43,7 +51,7 @@ function addHistory(userId, role, content) {
   if (user.history.length > 10) {
     user.history.shift();
   }
-  saveMemory();
+  // history is now RAM-only, so we don't save here.
 }
 
 function getHistoryString(userId) {
