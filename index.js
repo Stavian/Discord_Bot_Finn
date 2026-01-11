@@ -25,13 +25,14 @@ const {
 } = require("./src/audio");
 
 const {
-  extractKeyMemory
+  extractKeyMemory,
+  updateMemoryWithAI
 } = require("./src/memory");
 
 const {
   transcribeWithWhisper,
   askFinn,
-  speakWithCoqui,
+  speakWithAI,
   isFinnAddressed
 } = require("./src/ai");
 
@@ -77,13 +78,15 @@ async function processQueue() {
 
   try {
     // 1. Transcribe
+    console.log(`Transcribing file: ${wavFile}`);
     const text = await transcribeWithWhisper(wavFile);
+    console.log(`Transcription result: "${text}"`);
     
     // Clean up recorded file immediately after transcription
     fs.unlink(wavFile, () => {});
 
     if (!text || !isFinnAddressed(text)) {
-      // Not for Finn or empty, next task
+      if (text) console.log(`Finn ignored: "${text}" (Not addressed)`);
       isProcessing = false;
       processQueue();
       return;
@@ -91,17 +94,18 @@ async function processQueue() {
 
     // 2. Memory & Thinking
     extractKeyMemory(text, userId);
+    updateMemoryWithAI(text, userId); // Smart Memory (Background)
     sendStatus("🤖 Finn denkt nach...");
     const answer = await askFinn(text, userId, "voice");
+    console.log(`Finn's answer: "${answer}"`);
 
     // 3. Synthesis
-    const ttsFile = await speakWithCoqui(answer);
+    const ttsFile = await speakWithAI(answer);
+    console.log(`TTS generated: ${ttsFile}`);
 
     // 4. Wait for Audio Player to be free
     if (isSpeaking) {
       sendStatus("⏳ Finn wartet, bis er ausreden darf...");
-      // We push the ready-to-play TTS back to a special priority or just wait
-      // For simplicity: We wait here until audioPlayer is Idle
       while (isSpeaking) {
         await new Promise(r => setTimeout(r, 500));
       }
@@ -109,7 +113,10 @@ async function processQueue() {
 
     // 5. Play
     isSpeaking = true;
-    audioPlayer.play(createAudioResource(ttsFile));
+    const resource = createAudioResource(ttsFile, {
+      inputType: path.extname(ttsFile) === ".mp3" ? "arbitrary" : "raw"
+    });
+    audioPlayer.play(resource);
 
   } catch (err) {
     console.error("Queue Processing Error:", err);
@@ -138,7 +145,8 @@ function startRecordingUser(receiver, userId) {
   currentlyRecording.add(userId);
 
   const opusStream = receiver.subscribe(userId, {
-    end: { behavior: EndBehaviorType.AfterSilence, duration: 800 }
+    // Increased from 800ms to 1200ms to allow thinking pauses
+    end: { behavior: EndBehaviorType.AfterSilence, duration: 1200 }
   });
 
   const pcmStream = opusStream.pipe(
@@ -152,7 +160,10 @@ function startRecordingUser(receiver, userId) {
     currentlyRecording.delete(userId);
     
     const buffer = Buffer.concat(chunks);
-    if (buffer.length < 18000) return; // Too short
+    
+    // Ignore short noises (< 0.5s approx 48000 bytes)
+    // 48000 Hz * 2 bytes/sample * 0.5s = 48000 bytes
+    if (buffer.length < 48000) return; 
 
     const wavFile = path.join(WHISPER_DIR, `speech_${Date.now()}_${userId}.wav`);
     writeWavFile(wavFile, buffer);
@@ -217,6 +228,7 @@ client.on("messageCreate", async msg => {
     const text = msg.content.replace(/<@!?[0-9]+>/g, "").trim(); // Remove mentions
 
     extractKeyMemory(text, userId);
+    updateMemoryWithAI(text, userId); // Smart Memory (Background)
     
     try {
       const answer = await askFinn(text, userId, "text");

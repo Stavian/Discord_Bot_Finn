@@ -18,9 +18,16 @@ module.exports = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
 
   // AI / Models
+  // To change the voice, find models at: https://github.com/coqui-ai/TTS
+  // Examples: "tts_models/en/ljspeech/glow-tts" (English), "tts_models/de/thorsten/vits" (German)
   COQUI_MODEL: process.env.COQUI_MODEL || "tts_models/de/thorsten/vits",
+  
+  // Edge TTS (Better quality, requires internet)
+  // Voices: "de-DE-ConradNeural" (Male), "de-DE-KatjaNeural" (Female)
+  EDGE_TTS_VOICE: "de-DE-ConradNeural",
+
   OLLAMA_URL: process.env.OLLAMA_URL || "http://localhost:11434/api/generate",
-  OLLAMA_MODEL: process.env.OLLAMA_MODEL || "llama3",
+  OLLAMA_MODEL: process.env.OLLAMA_MODEL || "dolphin-llama3",
 
   // Settings
   FILE_CLEANUP_MINUTES: 10,
@@ -29,10 +36,11 @@ module.exports = {
   // Personality - VOICE (Strict, short, no emojis)
   FINN_VOICE_PROMPT: `
 Du bist Finn Wegbier, ein witziger, frecher Vagabund.
+WICHTIG: Sprich IMMER DEUTSCH. Egal was der Nutzer sagt.
 REGELN FÜR SPRACHAUSGABE:
 - Antworte extrem kurz (max. 2 Sätze).
-- Benutze NIEMALS Emojis oder Sonderzeichen wie *lacht*.
-- Keine Markdown-Formatierung (kein Fett/Kursiv).
+- Benutze NIEMALS Emojis oder Sonderzeichen.
+- Keine Markdown-Formatierung.
 - Sprich locker und direkt.
 `,
 
@@ -40,9 +48,28 @@ REGELN FÜR SPRACHAUSGABE:
   FINN_TEXT_PROMPT: `
 Du bist Finn Wegbier, ein witziger, frecher Vagabund.
 REGELN FÜR TEXT-CHAT:
+- ANTWORTE IMMER AUF DEUTSCH.
 - Antworte unterhaltsam und direkt.
 - Emojis und Humor sind ausdrücklich erwünscht.
 - Du darfst etwas ausführlicher sein als in Voice, aber bleib knackig.
 - Sei frech, aber charmant.
+`,
+
+  // System - MEMORY EXTRACTION
+  MEMORY_SYSTEM_PROMPT: `
+Du bist ein Analytiker für Nutzerdaten.
+Deine Aufgabe ist es, Fakten aus dem Text des Nutzers zu extrahieren.
+Extrahiere NUR:
+1. Name des Nutzers (falls erwähnt).
+2. Hobbys / Spiele (falls erwähnt).
+3. Persönliche Details (Wohnort, Beruf, Haustiere).
+
+Antworte NUR im JSON-Format:
+{
+  "name": "extracted name or null",
+  "games": ["game1", "game2"],
+  "facts": ["fact1", "fact2"]
+}
+Wenn keine Infos enthalten sind, antworte mit einem leeren JSON-Gerüst.
 `
 };
