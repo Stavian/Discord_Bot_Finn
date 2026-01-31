@@ -1,9 +1,16 @@
 {
-  "name": "discord-bot",
+  "name": "finn-wegbier",
   "version": "1.0.0",
-  "description": "",
+  "description": "Finn Wegbier - AI Discord Bot",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop FinnWegbier",
+    "pm2:restart": "pm2 restart FinnWegbier",
+    "pm2:logs": "pm2 logs FinnWegbier",
+    "pm2:monit": "pm2 monit",
+    "pm2:status": "pm2 status",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

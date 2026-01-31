@@ -16,6 +16,10 @@ module.exports = {
   // Discord
   STATUS_CHANNEL_ID: process.env.STATUS_CHANNEL_ID || "1287528424847708292",
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
+  VAGABOT_ID: process.env.VAGABOT_ID || "1459925000311144498",
+
+  // Minigame reaction settings
+  REACTION_CHANCE: 0.6, // 60% chance to react to game results
 
   // AI / Models
   // To change the voice, find models at: https://github.com/coqui-ai/TTS

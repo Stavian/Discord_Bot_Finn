@@ -16,7 +16,9 @@ const {
   STATUS_CHANNEL_ID,
   WHISPER_DIR,
   TTS_DIR,
-  FILE_CLEANUP_MINUTES
+  FILE_CLEANUP_MINUTES,
+  VAGABOT_ID,
+  REACTION_CHANCE
 } = require("./src/config");
 
 const {
@@ -191,8 +193,136 @@ function setupVoiceListeners(connection) {
   });
 }
 
+// ================= MINIGAME REACTIONS =================
+/**
+ * Detects if a VagaBot embed is a game result and returns the type.
+ * @returns {{ type: 'win' | 'loss' | null, gameName: string, playerName: string, amount: string }}
+ */
+function parseGameResult(embed) {
+  if (!embed || !embed.title) return { type: null };
+
+  const title = embed.title.toLowerCase();
+  const description = (embed.description || "").toLowerCase();
+
+  // Detect game type from title
+  let gameName = "Minigame";
+  if (title.includes("coinflip") || title.includes("münze")) gameName = "Coinflip";
+  else if (title.includes("high-low") || title.includes("highlow")) gameName = "High-Low";
+  else if (title.includes("roulette")) gameName = "Roulette";
+  else if (title.includes("duell")) gameName = "Duell";
+
+  // Extract player name from fields if available
+  let playerName = "";
+  let amount = "";
+
+  if (embed.fields) {
+    for (const field of embed.fields) {
+      if (field.name.includes("Gewinner") || field.name.includes("🏆")) {
+        playerName = field.value.replace(/\*\*/g, "").split("\n")[0];
+      }
+      if (field.name.includes("Gewinn") || field.name.includes("Verlust") || field.name.includes("Verloren")) {
+        amount = field.value;
+      }
+    }
+  }
+
+  // Win detection
+  if (
+    title.includes("gewonnen") ||
+    title.includes("gewinner") ||
+    title.includes("ausgezahlt") ||
+    title.includes("perfekt") ||
+    description.includes("gewonnen") ||
+    description.includes("überlebt")
+  ) {
+    return { type: "win", gameName, playerName, amount };
+  }
+
+  // Loss detection
+  if (
+    title.includes("verloren") ||
+    title.includes("peng") ||
+    title.includes("💔") ||
+    description.includes("verloren") ||
+    description.includes("falsch geraten")
+  ) {
+    return { type: "loss", gameName, playerName, amount };
+  }
+
+  return { type: null };
+}
+
+/**
+ * Generates a Finn-style reaction to game results.
+ */
+async function reactToGameResult(msg, result) {
+  // Random chance to react (don't spam every game)
+  if (Math.random() > REACTION_CHANCE) return;
+
+  // Add small delay to seem more natural (1-3 seconds)
+  await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+
+  const winReactions = [
+    "Oha, da hat aber einer Glück gehabt! 🍻 Gib mal einen aus, Kollege!",
+    "Nicht schlecht, Digga! Das nenn ich mal nen Lauf! 🎰",
+    "Pass auf, dass dir der Groschen nicht aus der Tasche fällt! 💰",
+    "Respekt, Meister! Da wär ich auch gern dabei gewesen! 🏕️",
+    "Na, da hat wohl einer den richtigen Riecher! Prost darauf! 🍺",
+    "Boah, fettes Ding! Davon kann ich mir 'ne Woche Wegbier kaufen! 🚂"
+  ];
+
+  const lossReactions = [
+    "Autsch, Kollege... Das tat sogar mir weh! 😬",
+    "Haha, erwischt! Passiert den Besten, Digga! 🎲",
+    "Ey, Kopf hoch! Morgen is auch noch'n Tag! 🌭",
+    "Na, das war wohl nix. Willst 'nen Schluck von meinem Bier? 🍺",
+    "Pech gehabt, Meister! Aber hey, wenigstens warst du mutig! 💪",
+    "Oioioi, das war knapp daneben! Nächstes Mal, Kumpel! 🚬"
+  ];
+
+  const bigWinReactions = [
+    "DIGGA! Das ist ja der WAHNSINN! 🎉🍻 Da würd ich glatt sesshaft werden!",
+    "ALTER! So viel hab ich ja noch NIE auf einem Haufen gesehen! 💰🔥",
+    "BOAH MEISTER! Du bist ja der KING! Lad mich mal auf ne Stulle ein! 🏆"
+  ];
+
+  const bigLossReactions = [
+    "Uff... Kollege, das war HEFTIG. Brauchst du 'ne Schulter zum Anlehnen? 😢",
+    "Meine Fresse, DAS war'n Absturz! Komm, wir teilen uns mein letztes Bier... 🍺",
+    "Autsch autsch autsch! Das hat selbst mir wehgetan, und ich schlaf unter Brücken! 💔"
+  ];
+
+  let reactions;
+
+  // Check for big amounts (over 500 coins)
+  const isBigAmount = result.amount && parseInt(result.amount.replace(/\D/g, "")) > 500;
+
+  if (result.type === "win") {
+    reactions = isBigAmount ? bigWinReactions : winReactions;
+  } else {
+    reactions = isBigAmount ? bigLossReactions : lossReactions;
+  }
+
+  const reaction = reactions[Math.floor(Math.random() * reactions.length)];
+
+  try {
+    await msg.channel.send(reaction);
+  } catch (err) {
+    console.error("Failed to send game reaction:", err);
+  }
+}
+
 // ================= BOT COMMANDS =================
 client.on("messageCreate", async msg => {
+  // Check for VagaBot game results
+  if (msg.author.id === VAGABOT_ID && msg.embeds.length > 0) {
+    const result = parseGameResult(msg.embeds[0]);
+    if (result.type) {
+      await reactToGameResult(msg, result);
+    }
+    return;
+  }
+
   if (msg.author.bot) return;
 
   // 1. Join Voice Command
