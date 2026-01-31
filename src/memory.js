@@ -1,6 +1,5 @@
 const fs = require("fs");
-const fetch = require("node-fetch");
-const { MEMORY_FILE, MAX_GAMES_PER_USER, OLLAMA_URL, OLLAMA_MODEL, MEMORY_SYSTEM_PROMPT } = require("./config");
+const { MEMORY_FILE, MAX_GAMES_PER_USER } = require("./config");
 
 let memory = {};
 
@@ -98,72 +97,10 @@ function extractKeyMemory(text, userId) {
   }
 }
 
-// New AI Method
+// AI Memory extraction disabled - was confusing the main AI
 async function updateMemoryWithAI(text, userId) {
-  // Don't analyze very short texts
-  if (text.length < 10) return;
-
-  try {
-    const res = await fetch(OLLAMA_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt: `${MEMORY_SYSTEM_PROMPT}\nTEXT: "${text}"`, 
-        stream: false,
-        format: "json" // Force JSON mode
-      })
-    });
-
-    const raw = await res.text();
-    const result = JSON.parse(JSON.parse(raw).response); // Ollama returns double-encoded JSON sometimes, or just .response
-    
-    if (!result) return;
-
-    const user = getUserMemory(userId);
-    let changed = false;
-
-    // 1. Update Name
-    if (result.name && result.name !== "null") {
-      // Prevent Finn from thinking the user is named Finn
-      if (!/finn|fynn/i.test(result.name)) {
-        user.name = result.name;
-        changed = true;
-      }
-    }
-
-    // 2. Update Games
-    if (result.games && Array.isArray(result.games)) {
-      user.games = user.games || [];
-      result.games.forEach(g => {
-        if (!user.games.includes(g)) {
-          user.games.unshift(g);
-          changed = true;
-        }
-      });
-      user.games = user.games.slice(0, MAX_GAMES_PER_USER);
-    }
-
-    // 3. Update Facts
-    if (result.facts && Array.isArray(result.facts)) {
-      user.facts = user.facts || [];
-      result.facts.forEach(f => {
-        if (!user.facts.includes(f)) {
-          user.facts.push(f);
-          changed = true;
-        }
-      });
-    }
-
-    if (changed) {
-      console.log(`🧠 [Smart Memory] Updated for ${userId}:`, result);
-      user.lastUpdated = Date.now();
-      saveMemory();
-    }
-
-  } catch (err) {
-    console.error("Smart Memory Error:", err.message);
-  }
+  // Disabled to prevent AI confusion
+  return;
 }
 
 module.exports = {

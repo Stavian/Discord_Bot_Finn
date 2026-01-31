@@ -1,86 +1,156 @@
-const { exec } = require("child_process");
-const fs = require("fs");
-const path = require("path");
 const fetch = require("node-fetch");
 const {
   OLLAMA_URL,
   OLLAMA_MODEL,
-  COQUI_MODEL,
-  EDGE_TTS_VOICE,
-  WHISPER_DIR,
-  TTS_DIR,
-  FINN_VOICE_PROMPT,
   FINN_TEXT_PROMPT
 } = require("./config");
-const { prepareTextForSpeech } = require("./audio");
 const { memory, addHistory, getHistoryString } = require("./memory");
 
-// Ensure directories exist
-fs.mkdirSync(WHISPER_DIR, { recursive: true });
-fs.mkdirSync(TTS_DIR, { recursive: true });
+// Grammar test - checks if the model followed the rules
+function grammarTest(text) {
+  if (!text) return { passed: false, errors: ["empty response"] };
 
-async function speakWithAI(text) {
-  const outWav = path.join(TTS_DIR, `speech_${Date.now()}.mp3`); // Edge TTS outputs MP3/Opus usually, but we can name it whatever.
-  const safeText = prepareTextForSpeech(text).replace(/"/g, "");
+  const errors = [];
 
-  return new Promise((resolve, reject) => {
-    // Using edge-tts via Python module (safer on Windows)
-    exec(
-      `python -m edge_tts --text "${safeText}" --write-media "${outWav}" --voice ${EDGE_TTS_VOICE}`, 
-      (error, stdout, stderr) => {
-        if (error) {
-          console.error("EdgeTTS Error:", error);
-          return reject(error);
-        }
-        resolve(outWav);
-      }
-    );
-  });
+  // Test 1: Check for uppercase letters (except in emojis)
+  const textWithoutEmojis = text.replace(/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, "");
+  if (textWithoutEmojis !== textWithoutEmojis.toLowerCase()) {
+    errors.push("GROSSBUCHSTABEN gefunden");
+  }
+
+  // Test 2: Check for ending punctuation
+  if (/[.!?]$/.test(text.trim())) {
+    errors.push("satzzeichen am ende");
+  }
+
+  // Test 3: Check for too many sentences (more than 2)
+  const sentenceCount = (text.match(/[.!?]/g) || []).length;
+  if (sentenceCount > 2) {
+    errors.push(`zu viele sätze (${sentenceCount})`);
+  }
+
+  // Test 4: Check for too many emojis
+  const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu;
+  const emojiCount = (text.match(emojiRegex) || []).length;
+  if (emojiCount > 1) {
+    errors.push(`zu viele emojis (${emojiCount})`);
+  }
+
+  // Test 5: Check for overly formal/dramatic phrases and character breaks
+  // Vagabund Finn spricht authentisch - keine AI/Bot Phrasen, keine hochgestochene Sprache
+  const formalPhrases = [
+    /ach du liebesgott/i,
+    /oh mein gott/i,
+    /ich bedauere/i,
+    /es tut mir leid/i,
+    /entschuldigung/i,
+    /entschuldige/i,
+    /ich bin nicht in der lage/i,
+    /bitte beachte/i,
+    /ich bin eine maschine/i,
+    /ich bin ein bot/i,
+    /ich bin ki/i,
+    /als ki/i,
+    /ich kann dir nicht helfen/i,
+    /die anfrage/i,
+    /keine emotionen/i,
+    /ich habe keine gefühle/i,
+    /ich bin ein sprachmodell/i,
+    /als sprachmodell/i,
+    /ich wurde programmiert/i,
+    /meine programmierung/i,
+    /ich bin ein computerprogramm/i,
+    /ich bin software/i,
+    /sehr geehrte/i,
+    /hochachtungsvoll/i,
+    /mit freundlichen grüßen/i
+  ];
+  for (const phrase of formalPhrases) {
+    if (phrase.test(text)) {
+      errors.push(`zu formell: "${text.match(phrase)[0]}"`);
+    }
+  }
+
+  // Test 6: Check response length (too long = over 250 chars for vagabond wisdom)
+  if (text.length > 250) {
+    errors.push(`zu lang (${text.length} zeichen)`);
+  }
+
+  // Test 7: Check for English phrases
+  const englishPhrases = [
+    /hey there/i,
+    /so it seems/i,
+    /I am/i,
+    /I can/i,
+    /you are/i,
+    /what do you/i,
+    /how are you/i,
+    /I think/i,
+    /I would/i,
+    /I have/i
+  ];
+  for (const phrase of englishPhrases) {
+    if (phrase.test(text)) {
+      errors.push(`ENGLISCH gefunden: "${text.match(phrase)[0]}"`);
+    }
+  }
+
+  const passed = errors.length === 0;
+
+  if (!passed) {
+    console.log("--- GRAMMATIK TEST FAILED ---");
+    console.log("Errors:", errors.join(", "));
+    console.log("Original:", text);
+    console.log("-----------------------------");
+  } else {
+    console.log("--- GRAMMATIK TEST PASSED ---");
+  }
+
+  return { passed, errors };
 }
 
-// Keep old function for reference if needed, or remove it. 
-// For now, I'm replacing the old Coqui one completely.
+// Force casual Discord style on the response
+function casualify(text) {
+  if (!text) return text;
 
-function transcribeWithWhisper(wavFile) {
-  return new Promise(resolve => {
-    exec(
-      `python -m whisper "${wavFile}" --model base --language German --fp16 False --output_format txt --output_dir "${WHISPER_DIR}"`, 
-      (error, stdout, stderr) => {
-        if (error) {
-          console.error("Whisper Exec Error:", error);
-          console.error("Whisper Stderr:", stderr);
-        }
-        const txtPath = wavFile.replace(".wav", ".txt");
-        if (!fs.existsSync(txtPath)) {
-          console.log("Whisper output file not found:", txtPath);
-          return resolve(null);
-        }
-        let text = fs.readFileSync(txtPath, "utf8").trim();
-        
-        // Filter common Whisper hallucinations (silence processing artifacts)
-        const hallucinations = [
-          "Hey there, hows it going", 
-          "Im feeling quite peppy", 
-          "Thank you for watching", 
-          "Subtitles by",
-          "Amara.org"
-        ];
-        
-        if (hallucinations.some(h => text.includes(h))) {
-          console.log("Ignored Whisper hallucination:", text);
-          return resolve(null);
-        }
+  // Lowercase everything
+  let result = text.toLowerCase();
 
-        resolve(text);
-      }
-    );
-  });
+  // Remove ending punctuation (keep emojis)
+  result = result.replace(/[.!?]+$/g, "");
+
+  // Remove multiple punctuation in text
+  result = result.replace(/[!?]{2,}/g, "");
+
+  // Limit to first 1-2 sentences (split by . ! ?)
+  const sentences = result.split(/(?<=[.!?])\s+/).slice(0, 2);
+  result = sentences.join(" ");
+
+  // Remove ending punctuation again after joining
+  result = result.replace(/[.!?]+$/g, "");
+
+  // Limit emojis to max 1
+  const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu;
+  const emojis = result.match(emojiRegex) || [];
+  if (emojis.length > 1) {
+    // Keep only the last emoji
+    let emojiCount = 0;
+    result = result.replace(emojiRegex, (match) => {
+      emojiCount++;
+      return emojiCount === emojis.length ? match : "";
+    });
+  }
+
+  // Clean up extra spaces
+  result = result.replace(/\s+/g, " ").trim();
+
+  return result;
 }
 
-async function askFinn(question, userId, mode = "voice") {
+async function askFinn(question, userId) {
   const mem = memory[userId];
   const history = getHistoryString(userId);
-  const systemPrompt = mode === "text" ? FINN_TEXT_PROMPT : FINN_VOICE_PROMPT;
+  const systemPrompt = FINN_TEXT_PROMPT;
 
   let userContext = "";
   if (mem?.name) userContext += `Der Nutzer heißt ${mem.name}. `; 
@@ -111,7 +181,13 @@ async function askFinn(question, userId, mode = "voice") {
 
     const data = await res.json();
     console.log("--- RAW RESPONSE ---", data);
-    const answer = data.response?.trim() || "";
+    const rawAnswer = data.response?.trim() || "";
+
+    // Run grammar test on raw response
+    grammarTest(rawAnswer);
+
+    const answer = casualify(rawAnswer);
+    console.log("--- CASUALIFIED ---", answer);
 
     // Update history
     addHistory(userId, "user", question);
@@ -120,7 +196,7 @@ async function askFinn(question, userId, mode = "voice") {
     return answer;
   } catch (error) {
     console.error("Ollama Error:", error);
-    return "Äh, mein Gehirn hat gerade einen Aussetzer.";
+    return "ey bruder mein kopf macht grad nicht mit, frag nochmal";
   }
 }
 
@@ -140,8 +216,6 @@ function isFinnAddressed(text) {
 }
 
 module.exports = {
-  speakWithAI,
-  transcribeWithWhisper,
   askFinn,
   isFinnAddressed
 };
