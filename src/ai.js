@@ -1,221 +1,182 @@
 const fetch = require("node-fetch");
 const {
-  OLLAMA_URL,
+  OLLAMA_CHAT_URL,
+  OLLAMA_HEALTH_URL,
   OLLAMA_MODEL,
-  FINN_TEXT_PROMPT
+  FINN_SYSTEM_PROMPT
 } = require("./config");
-const { memory, addHistory, getHistoryString } = require("./memory");
+const { getHistoryForChat, addHistory } = require("./memory");
 
-// Grammar test - checks if the model followed the rules
+// ================= HEALTH CHECK =================
+
+async function checkOllamaHealth() {
+  try {
+    const res = await fetch(OLLAMA_HEALTH_URL, { method: "GET", timeout: 5000 });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ================= GRAMMAR VALIDATION =================
+
 function grammarTest(text) {
   if (!text) return { passed: false, errors: ["empty response"] };
 
   const errors = [];
+  const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu;
 
-  // Test 1: Check for uppercase letters (except in emojis)
-  const textWithoutEmojis = text.replace(/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, "");
+  const textWithoutEmojis = text.replace(emojiRegex, "");
   if (textWithoutEmojis !== textWithoutEmojis.toLowerCase()) {
-    errors.push("GROSSBUCHSTABEN gefunden");
+    errors.push("GROSSBUCHSTABEN");
   }
 
-  // Test 2: Check for ending punctuation
   if (/[.!?]$/.test(text.trim())) {
     errors.push("satzzeichen am ende");
   }
 
-  // Test 3: Check for too many sentences (more than 2)
   const sentenceCount = (text.match(/[.!?]/g) || []).length;
   if (sentenceCount > 2) {
     errors.push(`zu viele sätze (${sentenceCount})`);
   }
 
-  // Test 4: Check for too many emojis
-  const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu;
   const emojiCount = (text.match(emojiRegex) || []).length;
   if (emojiCount > 1) {
     errors.push(`zu viele emojis (${emojiCount})`);
   }
 
-  // Test 5: Check for overly formal/dramatic phrases and character breaks
-  // Vagabund Finn spricht authentisch - keine AI/Bot Phrasen, keine hochgestochene Sprache
-  const formalPhrases = [
-    /ach du liebesgott/i,
-    /oh mein gott/i,
-    /ich bedauere/i,
-    /es tut mir leid/i,
-    /entschuldigung/i,
-    /entschuldige/i,
-    /ich bin nicht in der lage/i,
-    /bitte beachte/i,
-    /ich bin eine maschine/i,
-    /ich bin ein bot/i,
-    /ich bin ki/i,
-    /als ki/i,
-    /ich kann dir nicht helfen/i,
-    /die anfrage/i,
-    /keine emotionen/i,
-    /ich habe keine gefühle/i,
-    /ich bin ein sprachmodell/i,
-    /als sprachmodell/i,
-    /ich wurde programmiert/i,
-    /meine programmierung/i,
-    /ich bin ein computerprogramm/i,
-    /ich bin software/i,
-    /sehr geehrte/i,
-    /hochachtungsvoll/i,
-    /mit freundlichen grüßen/i
-  ];
-  for (const phrase of formalPhrases) {
-    if (phrase.test(text)) {
-      errors.push(`zu formell: "${text.match(phrase)[0]}"`);
-    }
-  }
-
-  // Test 6: Check response length (too long = over 250 chars for vagabond wisdom)
   if (text.length > 250) {
     errors.push(`zu lang (${text.length} zeichen)`);
   }
 
-  // Test 7: Check for English phrases
-  const englishPhrases = [
-    /hey there/i,
-    /so it seems/i,
-    /I am/i,
-    /I can/i,
-    /you are/i,
-    /what do you/i,
-    /how are you/i,
-    /I think/i,
-    /I would/i,
-    /I have/i
+  const blockedPhrases = [
+    /ich bin ein bot/i, /ich bin ki/i, /als ki/i,
+    /ich bin ein sprachmodell/i, /als sprachmodell/i,
+    /ich wurde programmiert/i, /ich bin software/i,
+    /ich bedauere/i, /es tut mir leid/i, /entschuldigung/i,
+    /sehr geehrte/i, /mit freundlichen grüßen/i,
+    /hey there/i, /I am /i, /I can /i, /you are/i
   ];
-  for (const phrase of englishPhrases) {
+  for (const phrase of blockedPhrases) {
     if (phrase.test(text)) {
-      errors.push(`ENGLISCH gefunden: "${text.match(phrase)[0]}"`);
+      errors.push(`verbotene phrase: "${text.match(phrase)[0]}"`);
     }
   }
 
   const passed = errors.length === 0;
-
   if (!passed) {
-    console.log("--- GRAMMATIK TEST FAILED ---");
-    console.log("Errors:", errors.join(", "));
-    console.log("Original:", text);
-    console.log("-----------------------------");
-  } else {
-    console.log("--- GRAMMATIK TEST PASSED ---");
+    console.log("[grammar] FAILED:", errors.join(", "), "| text:", text);
   }
-
   return { passed, errors };
 }
 
-// Force casual Discord style on the response
+// ================= CASUALIFY =================
+
 function casualify(text) {
   if (!text) return text;
 
-  // Lowercase everything
   let result = text.toLowerCase();
-
-  // Remove ending punctuation (keep emojis)
   result = result.replace(/[.!?]+$/g, "");
-
-  // Remove multiple punctuation in text
   result = result.replace(/[!?]{2,}/g, "");
 
-  // Limit to first 1-2 sentences (split by . ! ?)
+  // Limit to first 2 sentences
   const sentences = result.split(/(?<=[.!?])\s+/).slice(0, 2);
-  result = sentences.join(" ");
+  result = sentences.join(" ").replace(/[.!?]+$/g, "");
 
-  // Remove ending punctuation again after joining
-  result = result.replace(/[.!?]+$/g, "");
-
-  // Limit emojis to max 1
+  // Keep only last emoji if multiple
   const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu;
   const emojis = result.match(emojiRegex) || [];
   if (emojis.length > 1) {
-    // Keep only the last emoji
-    let emojiCount = 0;
-    result = result.replace(emojiRegex, (match) => {
-      emojiCount++;
-      return emojiCount === emojis.length ? match : "";
-    });
+    let count = 0;
+    result = result.replace(emojiRegex, m => (++count === emojis.length ? m : ""));
   }
 
-  // Clean up extra spaces
-  result = result.replace(/\s+/g, " ").trim();
+  // Enforce 250 char limit
+  if (result.length > 250) {
+    result = result.slice(0, 247) + "...";
+  }
 
-  return result;
+  return result.replace(/\s+/g, " ").trim();
 }
+
+// ================= OLLAMA CALL WITH RETRY =================
+
+async function callOllama(messages, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(OLLAMA_CHAT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          messages,
+          stream: false,
+          options: {
+            temperature: 0.75,
+            stop: ["Nutzer:", "User:"]
+          }
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      return data.message?.content?.trim() || "";
+    } catch (err) {
+      console.error(`[ollama] attempt ${attempt}/${retries} failed:`, err.message);
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+    }
+  }
+  return null;
+}
+
+// ================= ASK FINN =================
 
 async function askFinn(question, userId) {
-  const mem = memory[userId];
-  const history = getHistoryString(userId);
-  const systemPrompt = FINN_TEXT_PROMPT;
+  const history = getHistoryForChat(userId);
 
-  let userContext = "";
-  if (mem?.name) userContext += `Der Nutzer heißt ${mem.name}. `; 
-  if (mem?.games?.length) userContext += `Er spielt gerne ${mem.games.join(", ")}. `; 
+  // Build messages: system + history + new user message
+  const messages = [
+    { role: "system", content: FINN_SYSTEM_PROMPT },
+    ...history,
+    { role: "user", content: question }
+  ];
 
-  const conversationPrompt = `HINTERGRUND: ${userContext}\n\nBISHERIGER VERLAUF:\n${history}\n\nNutzer: ${question}\nFinn:`;
+  const raw = await callOllama(messages);
 
-  try {
-    console.log("--- PROMPT DEBUG ---");
-    console.log("System:", systemPrompt);
-    console.log("Conversation:", conversationPrompt);
-    console.log("--------------------");
-
-    const res = await fetch(OLLAMA_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        system: systemPrompt, // Moved instructions here
-        prompt: conversationPrompt,
-        stream: false,
-        options: {
-          temperature: 0.7,
-          stop: ["Nutzer:", "Finn:"]
-        }
-      })
-    });
-
-    const data = await res.json();
-    console.log("--- RAW RESPONSE ---", data);
-    const rawAnswer = data.response?.trim() || "";
-
-    // Run grammar test on raw response
-    grammarTest(rawAnswer);
-
-    const answer = casualify(rawAnswer);
-    console.log("--- CASUALIFIED ---", answer);
-
-    // Update history
-    addHistory(userId, "user", question);
-    addHistory(userId, "finn", answer);
-
-    return answer;
-  } catch (error) {
-    console.error("Ollama Error:", error);
+  if (!raw) {
     return "ey bruder mein kopf macht grad nicht mit, frag nochmal";
   }
+
+  grammarTest(raw);
+  const answer = casualify(raw);
+  console.log("[finn]", answer);
+
+  addHistory(userId, "user", question);
+  addHistory(userId, "assistant", answer);
+
+  return answer;
 }
+
+// ================= WAKE WORD =================
 
 function isFinnAddressed(text) {
   const t = text.toLowerCase().trim();
-  // Don't filter out "find" here anymore, as it might be a mistranscription of Finn
-  if (/(final|befinden)/i.test(t)) return false;
+  if (/(final|befinden|finden|findest|finalist)/i.test(t)) return false;
 
-  // Broadened to catch Fynn, Fin, Find, Fine
-  const wakeWord = /^(hey\s+)?(f+i+n+d?|f+y+n+)([.,!?\s]|$)/i;
-  
-  const direct = wakeWord.test(t);
-  const command = /(f+i+n+d?|f+y+n+).*(sag|erzähl|erklär|meinst|weißt|hör|hilf)/i.test(t);
-  const question = /(f+i+n+d?|f+y+n+).*(kannst|weißt|warum|was|wie|wer|wo)/i.test(t);
-
-  return direct || command || question;
+  // Match "finn", "fynn", "fin" at word boundary, optionally with "hey" prefix
+  const wakeWord = /(?:^|\s)(?:hey\s+)?f[iy]nn?([.,!?\s]|$)/i;
+  return wakeWord.test(t);
 }
 
 module.exports = {
   askFinn,
-  isFinnAddressed
+  isFinnAddressed,
+  checkOllamaHealth,
+  casualify,
+  callOllama
 };

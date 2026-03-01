@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Finn Wegbier** - A German-language Discord voice AI bot with local AI stack (Ollama LLM + Whisper STT). Features persistent user memory, dual persona modes (voice vs text), and real-time voice conversation capabilities.
+**Finn Wegbier** - A German-language Discord text-only bot powered by remote Ollama LLM. Features an authentic German vagabond/Tippelbruder persona with Rotwelsch vocabulary, proactive random chatter, persistent user memory, and VagaBot minigame reactions. Deployed in a Proxmox Ubuntu 24.04 LXC container; Ollama runs on a separate VM.
 
 ## Common Commands
 
@@ -14,202 +14,118 @@ npm install
 
 # Development (direct run)
 npm start
-# or
-node index.js
 
-# Production (PM2 process manager)
-npm run pm2:start      # Start bot
-npm run pm2:logs       # View logs
-npm run pm2:status     # Check status
-npm run pm2:restart    # Restart bot
-npm run pm2:stop       # Stop bot
+# Production (PM2)
+npm run pm2:start
+npm run pm2:logs
+npm run pm2:status
+npm run pm2:restart
+npm run pm2:stop
 
-# Required external dependencies (must be installed separately):
-# - Python 3.x with modules: whisper, edge_tts
-# - Ollama running locally on http://localhost:11434
-# - FFmpeg in system PATH
+# Required: Ollama running on remote VM at OLLAMA_URL
 ```
-
-## PM2 Configuration (ecosystem.config.js)
-
-**Production Settings:**
-- Memory limit: 500MB (auto-restart if exceeded)
-- Max 10 restarts within 10 seconds
-- 4-second restart delay
-- Logs to `logs/error.log` and `logs/out.log`
 
 ## Architecture
 
 ### Modular Structure (src/)
-- **config.js** - Central configuration, personality prompts, constants
-- **ai.js** - Wrappers for Whisper (STT), Ollama (LLM), Edge TTS (speech synthesis)
-- **audio.js** - WAV file handling, cleanup scheduling, audio processing
-- **memory.js** - Dual-tier memory system (regex + AI), JSON persistence
+- **config.js** - Env vars, Ollama URL config, chatter constants, system prompt with injected examples
+- **ai.js** - Ollama `/api/chat` wrapper, retry logic (3x), health check, grammar validation, casualify
+- **memory.js** - Per-user persistent memory (name, city, games, facts), conversation history for `/api/chat`
+- **reactions.js** - VagaBot minigame result parsing and reactions
+- **chatter.js** - Proactive random chatter engine (CHATTER_CHANCE, per-channel cooldown)
 
 ### Entry Point (index.js)
-Main Discord client event loop that coordinates all systems. Not modularized further to keep event handling centralized.
+Slim event router. Startup Ollama health check → Discord login → message routing.
 
-**Key Features:**
-- Voice channel recording and response
-- Text message handling with wake word detection
-- VagaBot minigame reaction system (watches for game results and comments)
+Message routing priority:
+1. VagaBot embeds → `handleVagaBotMessage()`
+2. Bot messages → skip
+3. Directly addressed (mention / wake word) → `askFinn()` + `extractKeyMemory()`
+4. Everything else → `maybeChatAlong()` (proactive chatter, 8% chance, 90s cooldown)
 
-### Dual-Mode Persona System
-The bot has two distinct personalities controlled by different system prompts:
+## Deployment on Ubuntu 24.04 LXC (Proxmox)
 
-- **Voice Mode** (FINN_VOICE_PROMPT): Ultra-short responses (1-2 sentences), no emojis, no markdown, TTS-optimized
-- **Text Mode** (FINN_TEXT_PROMPT): Expressive, uses emojis (🍻, 🏕️, 🚂, 🚬, 🌭), markdown allowed
-
-Mode selection happens automatically based on interaction type (voice channel vs text message).
-
-### Memory Architecture
-
-**Two-Tier Extraction:**
-1. **Fast Tier** (regex): Instant extraction of names and games using pattern matching
-2. **Smart Tier** (AI): Background LLM analysis for complex facts (hobbies, location, profession)
-
-**Persistence Strategy:**
-- User data saved to `memory.json` (names, games, facts)
-- Conversation history (last 10 messages) kept in RAM only - cleared on restart
-- Memory updates happen asynchronously to avoid blocking responses
-
-**Access Pattern:**
-```javascript
-// Always use getQueue-style pattern
-const userMemory = memory[userId] || { name: null, games: [], facts: [], messages: [] };
+```bash
+# In the CT:
+git clone <repo>
+cd finn-wegbier
+npm install
+cp .env.example .env
+# Edit .env — set DISCORD_TOKEN and OLLAMA_URL=http://<ollama-vm-ip>:11434
+npm install -g pm2
+pm2 start ecosystem.config.js
+pm2 save && pm2 startup
 ```
 
-### Queue-Based Voice Processing
+## Environment Variables (.env)
 
-Voice tasks are serialized to prevent freezing when multiple users speak simultaneously:
-
-```javascript
-const processingQueue = [];
-let isProcessing = false;
-
-// Tasks flow: Record → Transcribe → Update Memory → Query LLM → Synthesize → Play
+```env
+DISCORD_TOKEN=<required>
+STATUS_CHANNEL_ID=<channel_id>
+VAGABOT_ID=<vagabot_client_id>
+OLLAMA_URL=http://192.168.x.x:11434   # Remote Ollama VM IP
+OLLAMA_MODEL=llama3.2
+CHATTER_CHANCE=0.08
+CHATTER_COOLDOWN_MS=90000
+REACTION_CHANCE=0.6
 ```
 
-**Critical State Variables:**
-- `activeConnection` - Current voice channel connection
-- `currentlyRecording` - Set of user IDs being recorded
-- `processingQueue` - Pending voice tasks
-- `isProcessing` - Processing lock
-- `isSpeaking` - Audio player lock
+## Ollama API
 
-### Audio Pipeline
+Uses `/api/chat` endpoint (message array format), NOT `/api/generate`.
+Health check uses `/api/tags`.
+Base URL set via `OLLAMA_URL` env — no trailing slash, no path suffix.
 
-```
-Discord Opus Stream
-    ↓ (subscribe & decode with prism-media)
-PCM Stream (48kHz mono)
-    ↓ (write WAV file with custom header)
-Whisper Python Module
-    ↓ (German transcription)
-Ollama LLM
-    ↓ (German response)
-Edge TTS Python Module
-    ↓ (MP3/Opus audio)
-Discord Audio Player
-```
+## Character Persona — Finn Wegbier
 
-### Voice Activity Detection
+Authentic German vagabond (Tippelbruder/Berber). See system prompt in `src/config.js`.
 
-- **Silence threshold**: 1200ms (configurable in index.js)
-- **Maximum recording**: 15 seconds (security timeout)
-- **Noise filtering**: Discards recordings < 0.5 seconds
-- **Hallucination filtering**: Rejects common Whisper false transcriptions
+### Speech Rules
+- Always lowercase, no ending punctuation
+- Max 2 short sentences, max 250 characters, max 1 emoji
+- German only
+- Uses Rotwelsch vocabulary mixed with street slang
+- Blocks AI/bot-reveal phrases via grammar test in `src/ai.js`
 
-### Wake Word Detection
+## Proactive Chatter System
 
-Bot responds to text messages when:
-1. Mentioned directly (@Finn)
-2. Name appears in message ("Finn", "Fynn", "Fin", "Find")
-3. In designated status channel
-
-**Regex patterns filter false positives** (e.g., "befinden", "final" don't trigger).
-
-## Key Implementation Details
-
-### Python Integration
-All Python scripts are called via child_process spawn, not exec:
-```javascript
-const whisper = spawn('python', ['-m', 'whisper', ...]);
-const tts = spawn('edge-tts', ['--text', text, ...]);
-```
-
-### File Cleanup
-Automatic cleanup runs after each audio playback (10-minute threshold):
-- Deletes old files from `whisper/` and `tts/` directories
-- Triggered by `AudioPlayerStatus.Idle` event
-- Prevents storage bloat from continuous operation
-
-### Conversation Context
-LLM receives:
-- Last 10 messages from RAM (session-only)
-- User's name and favorite games (persistent)
-- Extracted facts about the user (persistent)
-- Appropriate system prompt (voice/text mode)
-
-### Error Handling
-No global error logger to Discord. Errors are logged to console only. The bot should continue running even if individual voice processing tasks fail.
+`src/chatter.js` makes Finn feel like a real Discord member:
+- **CHATTER_CHANCE** (default 8%): random roll per incoming message
+- **CHATTER_COOLDOWN_MS** (default 90s): minimum time between chatter per channel
+- Skips: bots, short messages (<5 chars), commands (! / .), bare URLs
+- 2–5 second natural delay before sending
+- Uses lightweight single-shot prompt (no conversation history)
 
 ## VagaBot Integration
 
-Finn watches for minigame results from VagaBot and reacts with his personality.
+`src/reactions.js` watches for VagaBot embed messages.
+- **60% chance** to react to other players' games
+- **Always reacts** when Finn himself was in the game
+- Detects: Coinflip, High-Low, Roulette, Duell
+- Separate message pools for: own win/loss/tie, others win/loss, big amounts (>500)
 
-### Supported Games
-- **Coinflip** - Coin flip gambling
-- **High-Low** - Number guessing game
-- **Roulette** - Russian roulette style game
-- **Duels** - PvP gambling matches
+## Memory System
 
-### Detection Logic (parseGameResult)
-Analyzes VagaBot embeds for:
-- **Win indicators**: Title contains "gewonnen", "ausgezahlt", "perfekt", description contains "überlebt"
-- **Loss indicators**: Title contains "verloren", "peng", "💔"
+`src/memory.js` — persisted to `memory.json` (history is RAM-only).
+Regex extraction: name, city, games, hobbies, age.
+History format: messages array compatible with `/api/chat`.
 
-### Reaction Behavior
-- **60% chance** to react (prevents spam, configurable via `REACTION_CHANCE`)
-- **1-3 second delay** before responding (natural timing)
-- **Big amounts (>500 coins)** trigger special dramatic reactions
-- Uses text-mode personality (emojis enabled)
+## Grammar Validation
 
-### Reaction Examples
-**Wins:**
-- "Oha, da hat aber einer Glück gehabt! 🍻 Gib mal einen aus, Kollege!"
-- "Na, da hat wohl einer den richtigen Riecher! Prost darauf! 🍺"
+`grammarTest()` in `src/ai.js`:
+1. No uppercase letters
+2. No ending punctuation
+3. Max 2 sentences
+4. Max 1 emoji
+5. No formal/bot-reveal phrases
+6. Max 250 characters
+7. No English phrases
 
-**Losses:**
-- "Autsch, Kollege... Das tat sogar mir weh! 😬"
-- "Pech gehabt, Meister! Aber hey, wenigstens warst du mutig! 💪"
+`casualify()` post-processes responses to enforce these rules.
 
-## Environment Variables
+## Wake Word Detection
 
-```env
-DISCORD_TOKEN=<bot_token>              # Required
-STATUS_CHANNEL_ID=<channel_id>         # Optional (for text responses)
-OLLAMA_MODEL=dolphin-llama3            # Optional (default: dolphin-llama3)
-VAGABOT_ID=<vagabot_client_id>         # Optional (for minigame reactions)
-```
-
-## Config Constants (src/config.js)
-
-```javascript
-REACTION_CHANCE: 0.6    // 60% chance to react to VagaBot game results
-```
-
-## German Language Requirements
-
-All user-facing text must be in German:
-- Voice responses from LLM (enforced by system prompt)
-- Status messages in Discord channels
-- Character personality (street vagrant, German slang)
-
-## Character Persona
-
-**Name:** Finn Wegbier (vagrant/hobo character)
-**Vocabulary:** Uses German slang like "Meister", "Kollege", "Pass auf", "Auf Achse"
-**Tone:** Rough, direct, street-smart but good-hearted
-**Voice Settings:** Raw and practical
-**Text Settings:** Playful with emojis when appropriate
+`isFinnAddressed()` in `src/ai.js`:
+- Matches "finn", "fynn", "fin" at word boundary
+- Excludes false positives: "final", "befinden", "finden", "findest", "finalist"
+- Also triggers on `@mention`

@@ -3,92 +3,128 @@ const { MEMORY_FILE, MAX_GAMES_PER_USER } = require("./config");
 
 let memory = {};
 
-// Initialize memory
+// Load persisted memory on startup
 if (fs.existsSync(MEMORY_FILE)) {
   try {
     memory = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf8"));
-  } catch (error) {
-    console.error("Error reading memory file:", error);
+  } catch (err) {
+    console.error("[memory] load error:", err);
     memory = {};
   }
 }
 
 function saveMemory() {
   try {
-    // Create a copy of memory for saving, excluding conversation history
-    const persistentMemory = {};
-    for (const [userId, data] of Object.entries(memory)) {
-      persistentMemory[userId] = {
-        ...data,
-        history: [] // Do not save conversation history to disk
-      };
+    const persistent = {};
+    for (const [uid, data] of Object.entries(memory)) {
+      persistent[uid] = { ...data, history: [] }; // history stays in RAM only
     }
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(persistentMemory, null, 2));
-  } catch (error) {
-    console.error("Error saving memory:", error);
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(persistent, null, 2));
+  } catch (err) {
+    console.error("[memory] save error:", err);
   }
 }
 
 function getUserMemory(userId) {
   if (!memory[userId]) {
-    memory[userId] = { 
-      lastUpdated: Date.now(),
-      history: [],
-      facts: [] // New: Generic facts list
-    };
+    memory[userId] = { history: [], facts: [] };
   }
   if (!memory[userId].history) memory[userId].history = [];
   if (!memory[userId].facts) memory[userId].facts = [];
   return memory[userId];
 }
 
+// ================= HISTORY =================
+
 function addHistory(userId, role, content) {
   const user = getUserMemory(userId);
-  user.history.push({ role, content, time: Date.now() });
-  
-  // Keep only last 10 messages
-  if (user.history.length > 10) {
-    user.history.shift();
-  }
-  // history is now RAM-only, so we don't save here.
+  user.history.push({ role, content });
+  if (user.history.length > 12) user.history.shift(); // keep last 12 turns
 }
 
-function getHistoryString(userId) {
+// Returns messages array for /api/chat (excludes system prompt — that's in ai.js)
+function getHistoryForChat(userId) {
   const user = getUserMemory(userId);
-  
-  let context = "";
-  if (user.facts && user.facts.length > 0) {
-    context += "Fakten über den Nutzer:\n- " + user.facts.join("\n- ") + "\n";
+
+  // Prepend a brief user-context line as first user turn if we know facts
+  const contextLines = [];
+  if (user.name) contextLines.push(`der nutzer heißt ${user.name}`);
+  if (user.city) contextLines.push(`kommt aus ${user.city}`);
+  if (user.games?.length) contextLines.push(`spielt gerne ${user.games.join(", ")}`);
+  if (user.facts?.length) contextLines.push(...user.facts.slice(0, 3));
+
+  const messages = [];
+
+  if (contextLines.length) {
+    messages.push({
+      role: "user",
+      content: `[kontext: ${contextLines.join(", ")}]`
+    });
+    messages.push({
+      role: "assistant",
+      content: "jo, kenn ich"
+    });
   }
-  
-  const chat = user.history
-    .map(h => `${h.role === "user" ? "Nutzer" : "Finn"}: ${h.content}`)
-    .join("\n");
-    
-  return context + "\n" + chat;
+
+  // Append actual conversation history
+  for (const h of user.history) {
+    messages.push({ role: h.role, content: h.content });
+  }
+
+  return messages;
 }
 
-// Old Regex Method (fast fallback)
+// ================= REGEX MEMORY EXTRACTION =================
+
 function extractKeyMemory(text, userId) {
   const lower = text.toLowerCase();
   const user = getUserMemory(userId);
   let changed = false;
 
-  const nameMatch = lower.match(/(ich heiße|mein name ist)\s+([a-zäöüß]+)/i);
+  // Name
+  const nameMatch = lower.match(/(?:ich heiße|mein name ist|ich bin der|ich bin die|nennt mich|call me)\s+([a-zäöüß]{2,20})/i);
   if (nameMatch) {
-    user.name = nameMatch[2];
+    user.name = nameMatch[1];
     changed = true;
   }
 
-  const gameMatch = lower.match(/(lieblingsspiel ist|spiele gerne)\s+([a-z0-9 ]+)/i);
+  // City / origin
+  const cityMatch = lower.match(/(?:ich komme aus|ich bin aus|lebe in|wohne in)\s+([a-zäöüß]{2,25})/i);
+  if (cityMatch) {
+    user.city = cityMatch[1];
+    changed = true;
+  }
+
+  // Games
+  const gameMatch = lower.match(/(?:lieblingsspiel ist|spiele gerne|zocke gerne|spiele hauptsächlich)\s+([a-z0-9 äöü]{2,30})/i);
   if (gameMatch) {
     user.games = user.games || [];
-    const game = gameMatch[2].trim();
+    const game = gameMatch[1].trim();
     if (!user.games.includes(game)) {
       user.games.unshift(game);
       user.games = user.games.slice(0, MAX_GAMES_PER_USER);
       changed = true;
     }
+  }
+
+  // Generic facts (hobby, age)
+  const hobbyMatch = lower.match(/(?:ich mag|ich liebe|mein hobby ist|mache gerne)\s+([a-z0-9äöü ]{3,30})/i);
+  if (hobbyMatch) {
+    const fact = `mag ${hobbyMatch[1].trim()}`;
+    if (!user.facts.includes(fact)) {
+      user.facts.unshift(fact);
+      user.facts = user.facts.slice(0, 5);
+      changed = true;
+    }
+  }
+
+  const ageMatch = lower.match(/(?:ich bin|ich werde)\s+(\d{1,2})\s+jahre/i);
+  if (ageMatch) {
+    const fact = `ist ${ageMatch[1]} jahre alt`;
+    user.facts = user.facts.filter(f => !f.startsWith("ist ") || !f.includes("jahre"));
+    user.facts.unshift(fact);
+    user.facts = user.facts.slice(0, 5);
+    changed = true;
   }
 
   if (changed) {
@@ -97,17 +133,10 @@ function extractKeyMemory(text, userId) {
   }
 }
 
-// AI Memory extraction disabled - was confusing the main AI
-async function updateMemoryWithAI(text, userId) {
-  // Disabled to prevent AI confusion
-  return;
-}
-
 module.exports = {
   memory,
   getUserMemory,
   extractKeyMemory,
-  updateMemoryWithAI,
   addHistory,
-  getHistoryString
+  getHistoryForChat
 };
