@@ -6,6 +6,7 @@ const { askFinn, isFinnAddressed, checkOllamaHealth } = require("./src/ai");
 const { extractKeyMemory } = require("./src/memory");
 const { handleVagaBotMessage } = require("./src/reactions");
 const { maybeChatAlong } = require("./src/chatter");
+const { startContextServer } = require("./src/contextServer");
 
 // ================= CLIENT =================
 
@@ -86,6 +87,7 @@ client.once(Events.ClientReady, async () => {
     : "🤖 Finn Wegbier ist online. ⚠️ Ollama nicht erreichbar.";
 
   sendStatus(statusText);
+  startContextServer();
   console.log("[finn] Bereit.");
 });
 

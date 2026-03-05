@@ -1,11 +1,29 @@
 const fetch = require("node-fetch");
+const fs = require("fs");
+const path = require("path");
 const {
   OLLAMA_CHAT_URL,
   OLLAMA_HEALTH_URL,
   OLLAMA_MODEL,
-  FINN_SYSTEM_PROMPT
+  BASE_DIR,
+  buildSystemPrompt
 } = require("./config");
 const { getHistoryForChat, addHistory } = require("./memory");
+
+const CONTEXT_FILE = path.join(BASE_DIR, "world_context.json");
+const CONTEXT_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+function loadWorldContext() {
+  try {
+    const raw = fs.readFileSync(CONTEXT_FILE, "utf8");
+    const ctx = JSON.parse(raw);
+    const age = Date.now() - new Date(ctx.timestamp).getTime();
+    if (age > CONTEXT_MAX_AGE_MS) return null;
+    return ctx;
+  } catch {
+    return null;
+  }
+}
 
 // ================= HEALTH CHECK =================
 
@@ -138,10 +156,11 @@ async function callOllama(messages, retries = 3) {
 
 async function askFinn(question, userId) {
   const history = getHistoryForChat(userId);
+  const worldContext = loadWorldContext();
 
   // Build messages: system + history + new user message
   const messages = [
-    { role: "system", content: FINN_SYSTEM_PROMPT },
+    { role: "system", content: buildSystemPrompt(worldContext) },
     ...history,
     { role: "user", content: question }
   ];
