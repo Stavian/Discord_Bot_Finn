@@ -38,8 +38,8 @@ function startContextServer() {
     res.end();
   });
 
-  server.listen(PORT, "127.0.0.1", () => {
-    console.log(`[context] Context-Server läuft auf 127.0.0.1:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`[context] Context-Server läuft auf 0.0.0.0:${PORT}`);
   });
 
   server.on("error", err => {
