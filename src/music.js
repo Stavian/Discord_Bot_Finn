@@ -6,13 +6,12 @@ const {
   createAudioResource,
   AudioPlayerStatus,
   VoiceConnectionStatus,
+  StreamType,
   entersState,
 } = require("@discordjs/voice");
 const playdl = require("play-dl");
+const { spawn } = require("child_process");
 const { MUSIC_ROLE_IDS } = require("./config");
-
-// ================= FFMPEG SETUP =================
-process.env.FFMPEG_PATH = require("ffmpeg-static");
 
 // ================= STATE =================
 // Map<guildId: string, GuildMusicState> — in-memory, resets on bot restart
@@ -156,28 +155,50 @@ function cancelLeave(guildId) {
   state.leaveTimer = null;
 }
 
+// ================= YT-DLP HELPERS =================
+// play-dl is used only for URL validation. All fetching and streaming
+// goes through yt-dlp which handles YouTube's constantly changing API.
+
+function ytdlpExec(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("yt-dlp", args);
+    let out = "";
+    let err = "";
+    proc.stdout.on("data", d => (out += d));
+    proc.stderr.on("data", d => (err += d));
+    proc.on("close", code => {
+      if (code !== 0) return reject(new Error(err.trim() || `yt-dlp exited ${code}`));
+      resolve(out);
+    });
+    proc.on("error", reject);
+  });
+}
+
 // ================= URL RESOLUTION =================
 
 async function resolveTrack(url, requestedBy) {
-  const info = await playdl.video_info(url);
-  const d = info.video_details;
-  // Use original url — d.url can have unexpected formats that playdl.stream() rejects
-  return { url, title: d.title || url, duration: d.durationInSec || 0, requestedBy };
+  const raw = await ytdlpExec(["--dump-json", "--no-playlist", "-q", url]);
+  const info = JSON.parse(raw);
+  return {
+    url,
+    title: info.title || url,
+    duration: info.duration || 0,
+    requestedBy,
+  };
 }
 
 async function resolvePlaylist(url, requestedBy, textChannel) {
-  const playlist = await playdl.playlist_info(url, { incomplete: true });
-  const videos = playlist.videos || [];
-  let slice = videos;
+  const raw = await ytdlpExec(["--flat-playlist", "--dump-json", "-q", url]);
+  const entries = raw.split("\n").filter(Boolean).map(l => JSON.parse(l));
+  let slice = entries;
   if (slice.length > 50) {
     slice = slice.slice(0, 50);
     textChannel.send(pick(PHRASES.playlistCapped)).catch(() => {});
   }
   return slice.map(v => ({
-    // Construct canonical URL from ID — v.url can be undefined for unavailable playlist entries
     url: `https://www.youtube.com/watch?v=${v.id}`,
     title: v.title || v.id || "Unbekannt",
-    duration: v.durationInSec || 0,
+    duration: v.duration || 0,
     requestedBy,
   }));
 }
@@ -212,8 +233,14 @@ async function playNext(guildId) {
 
   let resource;
   try {
-    const stream = await playdl.stream(track.url, { quality: 2 });
-    resource = createAudioResource(stream.stream, { inputType: stream.type });
+    const ytdlp = spawn("yt-dlp", [
+      "-f", "bestaudio[ext=webm]/bestaudio[ext=ogg]/bestaudio",
+      "--no-playlist",
+      "-o", "-",
+      "-q", "--no-warnings",
+      track.url,
+    ], { stdio: ["ignore", "pipe", "ignore"] });
+    resource = createAudioResource(ytdlp.stdout, { inputType: StreamType.Arbitrary });
   } catch (err) {
     console.error("[music] stream error:", err.message);
     if (!isFirst) state.textChannel.send(pick(PHRASES.streamFail)).catch(() => {});
