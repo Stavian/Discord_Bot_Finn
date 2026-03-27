@@ -12,22 +12,15 @@ const playdl = require("play-dl");
 const { MUSIC_ROLE_IDS } = require("./config");
 
 // ================= FFMPEG SETUP =================
-// Tell prism-media (used by @discordjs/voice) where the static ffmpeg binary lives.
 process.env.FFMPEG_PATH = require("ffmpeg-static");
 
 // ================= STATE =================
-// Per-guild music state — reset on bot restart (voice state is ephemeral).
-// Map<guildId: string, GuildMusicState>
+// Map<guildId: string, GuildMusicState> — in-memory, resets on bot restart
 const guildStates = new Map();
 
 // ================= PHRASES =================
-// All lowercase, no ending punctuation — matches Finn's speech rules.
+// All lowercase, no ending punctuation — matches Finn's speech rules
 const PHRASES = {
-  join: [
-    "jo bin dabei, wo spielt die musik alter",
-    "ey ich kletter rein, mal schauen was läuft",
-    "bin drin bruder, leg los",
-  ],
   nowPlaying: [
     "leg auf: %s",
     "jo läuft: %s",
@@ -107,7 +100,7 @@ const PHRASES = {
   ],
 };
 
-// Pick a random phrase, substituting %s / %d with provided args.
+// Pick a random phrase, substituting %s / %d with provided args
 function pick(pool, ...args) {
   const tpl = Array.isArray(pool)
     ? pool[Math.floor(Math.random() * pool.length)]
@@ -134,6 +127,7 @@ function getOrCreateState(guildId, textChannel) {
       isPaused: false,
       textChannel,
       leaveTimer: null,
+      firstPlay: false, // suppresses nowPlaying textChannel.send for interaction-initiated play
     });
   }
   return guildStates.get(guildId);
@@ -166,26 +160,16 @@ function cancelLeave(guildId) {
 
 async function resolveTrack(url, requestedBy) {
   const info = await playdl.video_info(url);
-  const details = info.video_details;
-  return {
-    url: details.url,
-    title: details.title || url,
-    duration: details.durationInSec || 0,
-    requestedBy,
-  };
+  const d = info.video_details;
+  return { url: d.url, title: d.title || url, duration: d.durationInSec || 0, requestedBy };
 }
 
-// Returns TrackInfo[], sends playlist-capped notice to textChannel if needed.
 async function resolvePlaylist(url, requestedBy, textChannel) {
   const playlist = await playdl.playlist_info(url, { incomplete: true });
   const videos = playlist.videos || [];
-  let capped = false;
   let slice = videos;
   if (slice.length > 50) {
-    capped = true;
     slice = slice.slice(0, 50);
-  }
-  if (capped) {
     textChannel.send(pick(PHRASES.playlistCapped)).catch(() => {});
   }
   return slice.map(v => ({
@@ -196,22 +180,17 @@ async function resolvePlaylist(url, requestedBy, textChannel) {
   }));
 }
 
-// Validates URL and returns TrackInfo[].
 async function resolveUrl(url, requestedBy, textChannel) {
   const validated = await playdl.validate(url);
-  if (!validated || !String(validated).startsWith("yt_")) {
-    throw new Error("not_youtube");
-  }
-  if (validated === "yt_playlist") {
-    return resolvePlaylist(url, requestedBy, textChannel);
-  }
-  // yt_video or yt_video_id
-  const track = await resolveTrack(url, requestedBy);
-  return [track];
+  if (!validated || !String(validated).startsWith("yt_")) throw new Error("not_youtube");
+  if (validated === "yt_playlist") return resolvePlaylist(url, requestedBy, textChannel);
+  return [await resolveTrack(url, requestedBy)];
 }
 
 // ================= PLAYBACK =================
 
+// firstPlay flag suppresses the nowPlaying message when the interaction reply
+// already serves as the "now playing" confirmation for the first track.
 async function playNext(guildId) {
   const state = guildStates.get(guildId);
   if (!state) return;
@@ -226,19 +205,23 @@ async function playNext(guildId) {
   const track = state.queue.shift();
   state.currentTrack = track;
 
+  const isFirst = state.firstPlay;
+  state.firstPlay = false;
+
   let resource;
   try {
     const stream = await playdl.stream(track.url, { quality: 2 });
     resource = createAudioResource(stream.stream, { inputType: stream.type });
   } catch (err) {
     console.error("[music] stream error:", err.message);
-    state.textChannel.send(pick(PHRASES.streamFail)).catch(() => {});
-    // Try next track
+    if (!isFirst) state.textChannel.send(pick(PHRASES.streamFail)).catch(() => {});
     return playNext(guildId);
   }
 
   state.player.play(resource);
-  state.textChannel.send(pick(PHRASES.nowPlaying, track.title)).catch(() => {});
+  if (!isFirst) {
+    state.textChannel.send(pick(PHRASES.nowPlaying, track.title)).catch(() => {});
+  }
 }
 
 async function joinChannel(voiceChannel, guildId, textChannel) {
@@ -258,7 +241,6 @@ async function joinChannel(voiceChannel, guildId, textChannel) {
   state.connection = connection;
   state.player = player;
 
-  // Advance queue when a track finishes
   player.on(AudioPlayerStatus.Idle, () => {
     playNext(guildId).catch(err => console.error("[music] playNext error:", err));
   });
@@ -268,10 +250,8 @@ async function joinChannel(voiceChannel, guildId, textChannel) {
     playNext(guildId).catch(() => {});
   });
 
-  // Clean up state if the bot is kicked or disconnected
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
     try {
-      // Give Discord a moment to reconnect before destroying
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
@@ -284,146 +264,125 @@ async function joinChannel(voiceChannel, guildId, textChannel) {
   connection.on(VoiceConnectionStatus.Destroyed, () => {
     destroyState(guildId);
   });
-
-  textChannel.send(pick(PHRASES.join)).catch(() => {});
 }
 
 // ================= COMMANDS =================
 
-async function cmdPlay(msg, args) {
-  if (!checkRole(msg.member)) {
-    return msg.channel.send(pick(PHRASES.noPermission));
+async function cmdSpiel(interaction) {
+  if (!checkRole(interaction.member)) {
+    return interaction.reply({ content: pick(PHRASES.noPermission), ephemeral: true });
   }
-
-  const voiceChannel = msg.member.voice?.channel;
+  const voiceChannel = interaction.member.voice?.channel;
   if (!voiceChannel) {
-    return msg.channel.send(pick(PHRASES.notInVoice));
+    return interaction.reply({ content: pick(PHRASES.notInVoice), ephemeral: true });
   }
 
-  const url = args[0];
-  if (!url) {
-    return msg.channel.send("gib mir auch nen link alter");
-  }
+  const url = interaction.options.getString("url");
+  await interaction.deferReply();
 
   let tracks;
   try {
-    tracks = await resolveUrl(url, msg.member.displayName, msg.channel);
+    tracks = await resolveUrl(url, interaction.member.displayName, interaction.channel);
   } catch (err) {
-    if (err.message === "not_youtube") {
-      return msg.channel.send(pick(PHRASES.notYoutube));
-    }
+    if (err.message === "not_youtube") return interaction.editReply(pick(PHRASES.notYoutube));
     console.error("[music] resolve error:", err.message);
-    return msg.channel.send(pick(PHRASES.badUrl));
+    return interaction.editReply(pick(PHRASES.badUrl));
   }
+  if (!tracks || tracks.length === 0) return interaction.editReply(pick(PHRASES.badUrl));
 
-  if (!tracks || tracks.length === 0) {
-    return msg.channel.send(pick(PHRASES.badUrl));
-  }
+  const state = getOrCreateState(interaction.guild.id, interaction.channel);
+  if (!state.connection) await joinChannel(voiceChannel, interaction.guild.id, interaction.channel);
 
-  const state = getOrCreateState(msg.guild.id, msg.channel);
-
-  // Join voice if not already connected
-  if (!state.connection) {
-    await joinChannel(voiceChannel, msg.guild.id, msg.channel);
-  }
-
-  cancelLeave(msg.guild.id);
+  cancelLeave(interaction.guild.id);
 
   const wasIdle = state.currentTrack === null && state.queue.length === 0;
+  state.queue.push(...tracks);
 
-  if (tracks.length === 1) {
-    state.queue.push(tracks[0]);
-    if (wasIdle) {
-      await playNext(msg.guild.id);
+  if (wasIdle) {
+    state.firstPlay = true;
+    await playNext(interaction.guild.id);
+    // state.currentTrack is now set by playNext
+    const title = state.currentTrack?.title ?? tracks[0].title;
+    if (tracks.length === 1) {
+      await interaction.editReply(pick(PHRASES.nowPlaying, title));
     } else {
-      msg.channel.send(pick(PHRASES.queued, tracks[0].title)).catch(() => {});
+      await interaction.editReply(pick(PHRASES.playlistQueued, tracks.length));
     }
   } else {
-    state.queue.push(...tracks);
-    msg.channel.send(pick(PHRASES.playlistQueued, tracks.length)).catch(() => {});
-    if (wasIdle) {
-      await playNext(msg.guild.id);
+    if (tracks.length === 1) {
+      await interaction.editReply(pick(PHRASES.queued, tracks[0].title));
+    } else {
+      await interaction.editReply(pick(PHRASES.playlistQueued, tracks.length));
     }
   }
 }
 
-async function cmdStop(msg) {
-  if (!checkRole(msg.member)) {
-    return msg.channel.send(pick(PHRASES.noPermission));
+async function cmdStopp(interaction) {
+  if (!checkRole(interaction.member)) {
+    return interaction.reply({ content: pick(PHRASES.noPermission), ephemeral: true });
   }
-  if (!guildStates.has(msg.guild.id)) {
-    return msg.channel.send(pick(PHRASES.notPlaying));
+  if (!guildStates.has(interaction.guild.id)) {
+    return interaction.reply(pick(PHRASES.notPlaying));
   }
-  msg.channel.send(pick(PHRASES.stop)).catch(() => {});
-  destroyState(msg.guild.id);
+  await interaction.reply(pick(PHRASES.stop));
+  destroyState(interaction.guild.id);
 }
 
-async function cmdSkip(msg) {
-  if (!checkRole(msg.member)) {
-    return msg.channel.send(pick(PHRASES.noPermission));
+async function cmdNachste(interaction) {
+  if (!checkRole(interaction.member)) {
+    return interaction.reply({ content: pick(PHRASES.noPermission), ephemeral: true });
   }
-  const state = guildStates.get(msg.guild.id);
-  if (!state || !state.currentTrack) {
-    return msg.channel.send(pick(PHRASES.nothingPlaying));
-  }
-  msg.channel.send(pick(PHRASES.skip)).catch(() => {});
-  // Stopping the player triggers the Idle event which calls playNext automatically
-  state.player.stop();
+  const state = guildStates.get(interaction.guild.id);
+  if (!state || !state.currentTrack) return interaction.reply(pick(PHRASES.nothingPlaying));
+  state.isPaused = false;
+  await interaction.reply(pick(PHRASES.skip));
+  state.player.stop(); // triggers Idle → playNext
 }
 
-async function cmdListe(msg) {
-  if (!checkRole(msg.member)) {
-    return msg.channel.send(pick(PHRASES.noPermission));
+async function cmdListe(interaction) {
+  if (!checkRole(interaction.member)) {
+    return interaction.reply({ content: pick(PHRASES.noPermission), ephemeral: true });
   }
-  const state = guildStates.get(msg.guild.id);
+  const state = guildStates.get(interaction.guild.id);
   if (!state || (!state.currentTrack && state.queue.length === 0)) {
-    return msg.channel.send(pick(PHRASES.nothingPlaying));
+    return interaction.reply(pick(PHRASES.nothingPlaying));
   }
 
   const lines = [PHRASES.queueHeader];
   if (state.currentTrack) {
-    const dur = formatDuration(state.currentTrack.duration);
-    lines.push(`1. [jetzt] ${state.currentTrack.title} (${dur}) — ${state.currentTrack.requestedBy}`);
+    lines.push(`1. [jetzt] ${state.currentTrack.title} (${formatDuration(state.currentTrack.duration)}) — ${state.currentTrack.requestedBy}`);
   }
-  const shown = state.queue.slice(0, 10);
-  shown.forEach((t, i) => {
-    const dur = formatDuration(t.duration);
+  state.queue.slice(0, 10).forEach((t, i) => {
     const num = state.currentTrack ? i + 2 : i + 1;
-    lines.push(`${num}. ${t.title} (${dur}) — ${t.requestedBy}`);
+    lines.push(`${num}. ${t.title} (${formatDuration(t.duration)}) — ${t.requestedBy}`);
   });
-  if (state.queue.length > 10) {
-    lines.push(`… (${state.queue.length - 10} weitere)`);
-  }
+  if (state.queue.length > 10) lines.push(`… (${state.queue.length - 10} weitere)`);
 
-  msg.channel.send(lines.join("\n")).catch(() => {});
+  await interaction.reply(lines.join("\n"));
 }
 
-async function cmdPause(msg) {
-  if (!checkRole(msg.member)) {
-    return msg.channel.send(pick(PHRASES.noPermission));
+async function cmdPause(interaction) {
+  if (!checkRole(interaction.member)) {
+    return interaction.reply({ content: pick(PHRASES.noPermission), ephemeral: true });
   }
-  const state = guildStates.get(msg.guild.id);
-  if (!state || !state.currentTrack) {
-    return msg.channel.send(pick(PHRASES.nothingPlaying));
-  }
-  if (state.isPaused) return;
+  const state = guildStates.get(interaction.guild.id);
+  if (!state || !state.currentTrack) return interaction.reply(pick(PHRASES.nothingPlaying));
+  if (state.isPaused) return interaction.reply({ content: "schon pausiert bruder", ephemeral: true });
   state.player.pause();
   state.isPaused = true;
-  msg.channel.send(pick(PHRASES.pause)).catch(() => {});
+  await interaction.reply(pick(PHRASES.pause));
 }
 
-async function cmdWeiter(msg) {
-  if (!checkRole(msg.member)) {
-    return msg.channel.send(pick(PHRASES.noPermission));
+async function cmdWeiter(interaction) {
+  if (!checkRole(interaction.member)) {
+    return interaction.reply({ content: pick(PHRASES.noPermission), ephemeral: true });
   }
-  const state = guildStates.get(msg.guild.id);
-  if (!state || !state.currentTrack) {
-    return msg.channel.send(pick(PHRASES.nothingPlaying));
-  }
-  if (!state.isPaused) return;
+  const state = guildStates.get(interaction.guild.id);
+  if (!state || !state.currentTrack) return interaction.reply(pick(PHRASES.nothingPlaying));
+  if (!state.isPaused) return interaction.reply({ content: "läuft doch schon bruder", ephemeral: true });
   state.player.unpause();
   state.isPaused = false;
-  msg.channel.send(pick(PHRASES.resume)).catch(() => {});
+  await interaction.reply(pick(PHRASES.resume));
 }
 
 // ================= HELPERS =================
@@ -435,29 +394,19 @@ function formatDuration(seconds) {
   return `${m}:${s}`;
 }
 
-// ================= COMMAND ROUTER =================
+// ================= INTERACTION ROUTER =================
 
-async function handleMusicCommand(msg) {
-  if (!msg.guild) return; // Ignore DMs
-
-  const parts = msg.content.trim().split(/\s+/);
-  // parts[0] = "!gitarre", parts[1] = subcommand, parts[2+] = args
-  const sub = (parts[1] || "").toLowerCase();
-  const args = parts.slice(2);
-
+async function handleMusicInteraction(interaction) {
+  if (!interaction.guild) return;
+  const sub = interaction.options.getSubcommand();
   switch (sub) {
-    case "spiel":   return cmdPlay(msg, args);
-    case "stopp":   return cmdStop(msg);
-    case "nächste":
-    case "nachste": return cmdSkip(msg);   // fallback without umlaut
-    case "liste":   return cmdListe(msg);
-    case "pause":   return cmdPause(msg);
-    case "weiter":  return cmdWeiter(msg);
-    default:
-      return msg.channel.send(
-        "commands: `!gitarre spiel <url>` · `stopp` · `nächste` · `liste` · `pause` · `weiter`"
-      );
+    case "spiel":   return cmdSpiel(interaction);
+    case "stopp":   return cmdStopp(interaction);
+    case "nachste": return cmdNachste(interaction);
+    case "liste":   return cmdListe(interaction);
+    case "pause":   return cmdPause(interaction);
+    case "weiter":  return cmdWeiter(interaction);
   }
 }
 
-module.exports = { handleMusicCommand };
+module.exports = { handleMusicInteraction };
