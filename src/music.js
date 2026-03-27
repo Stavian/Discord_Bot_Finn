@@ -161,7 +161,8 @@ function cancelLeave(guildId) {
 async function resolveTrack(url, requestedBy) {
   const info = await playdl.video_info(url);
   const d = info.video_details;
-  return { url: d.url, title: d.title || url, duration: d.durationInSec || 0, requestedBy };
+  // Use original url — d.url can have unexpected formats that playdl.stream() rejects
+  return { url, title: d.title || url, duration: d.durationInSec || 0, requestedBy };
 }
 
 async function resolvePlaylist(url, requestedBy, textChannel) {
@@ -173,8 +174,9 @@ async function resolvePlaylist(url, requestedBy, textChannel) {
     textChannel.send(pick(PHRASES.playlistCapped)).catch(() => {});
   }
   return slice.map(v => ({
-    url: v.url,
-    title: v.title || v.url,
+    // Construct canonical URL from ID — v.url can be undefined for unavailable playlist entries
+    url: `https://www.youtube.com/watch?v=${v.id}`,
+    title: v.title || v.id || "Unbekannt",
     duration: v.durationInSec || 0,
     requestedBy,
   }));
