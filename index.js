@@ -14,7 +14,8 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
   ]
 });
 
@@ -45,6 +46,13 @@ async function waitForOllama(retries = 5, delayMs = 5000) {
 // ================= MESSAGE HANDLER =================
 
 client.on("messageCreate", async msg => {
+  // Music commands
+  if (msg.content.startsWith("!gitarre")) {
+    const { handleMusicCommand } = require("./src/music");
+    handleMusicCommand(msg).catch(err => console.error("[main] music error:", err));
+    return;
+  }
+
   // VagaBot game results
   if (msg.author.id === VAGABOT_ID && msg.embeds.length > 0) {
     await handleVagaBotMessage(msg, client.user.id);

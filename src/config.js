@@ -33,6 +33,10 @@ module.exports = {
   // Memory
   MAX_GAMES_PER_USER: 3,
 
+  // Music bot — comma-separated Discord role IDs allowed to use !gitarre
+  // Empty array = everyone can use it
+  MUSIC_ROLE_IDS: (process.env.MUSIC_ROLE_IDS || "").split(",").map(s => s.trim()).filter(Boolean),
+
 };
 
 // Persona system prompt — optionally enriched with real-world context from n8n
