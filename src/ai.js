@@ -2,16 +2,17 @@ const fetch = require("node-fetch");
 const fs = require("fs");
 const path = require("path");
 const {
-  OLLAMA_CHAT_URL,
-  OLLAMA_HEALTH_URL,
-  OLLAMA_MODEL,
+  LLM_CHAT_URL,
+  LLM_HEALTH_URL,
+  LLM_MODEL,
+  LLM_API_KEY,
   BASE_DIR,
   buildSystemPrompt
 } = require("./config");
 const { getHistoryForChat, addHistory } = require("./memory");
 
 const CONTEXT_FILE = path.join(BASE_DIR, "world_context.json");
-const CONTEXT_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours
+const CONTEXT_MAX_AGE_MS = parseInt(process.env.CONTEXT_MAX_AGE_MS) || 6 * 60 * 60 * 1000; // default 6h
 
 function loadWorldContext() {
   try {
@@ -27,9 +28,9 @@ function loadWorldContext() {
 
 // ================= HEALTH CHECK =================
 
-async function checkOllamaHealth() {
+async function checkLLMHealth() {
   try {
-    const res = await fetch(OLLAMA_HEALTH_URL, { method: "GET", timeout: 5000 });
+    const res = await fetch(LLM_HEALTH_URL, { method: "GET", timeout: 5000 });
     return res.ok;
   } catch {
     return false;
@@ -119,20 +120,22 @@ function casualify(text) {
 
 // ================= OLLAMA CALL WITH RETRY =================
 
-async function callOllama(messages, retries = 3) {
+async function callLLM(messages, retries = 3) {
+  const headers = { "Content-Type": "application/json" };
+  if (LLM_API_KEY) headers["Authorization"] = `Bearer ${LLM_API_KEY}`;
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(OLLAMA_CHAT_URL, {
+      const res = await fetch(LLM_CHAT_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
-          model: OLLAMA_MODEL,
+          model: LLM_MODEL,
           messages,
           stream: false,
-          options: {
-            temperature: 0.75,
-            stop: ["Nutzer:", "User:"]
-          }
+          temperature: 0.75,
+          max_tokens: 150,
+          stop: ["Nutzer:", "User:", "<|im_end|>", "<|im_start|>", "</s>"]
         })
       });
 
@@ -141,9 +144,9 @@ async function callOllama(messages, retries = 3) {
       }
 
       const data = await res.json();
-      return data.message?.content?.trim() || "";
+      return (data.choices?.[0]?.message?.content || "").replace(/<\|[^|]*\|>/g, "").replace(/<\/s>/g, "").trim();
     } catch (err) {
-      console.error(`[ollama] attempt ${attempt}/${retries} failed:`, err.message);
+      console.error(`[llm] attempt ${attempt}/${retries} failed:`, err.message);
       if (attempt < retries) {
         await new Promise(r => setTimeout(r, 2000 * attempt));
       }
@@ -165,14 +168,19 @@ async function askFinn(question, userId) {
     { role: "user", content: question }
   ];
 
-  const raw = await callOllama(messages);
+  const raw = await callLLM(messages);
 
   if (!raw) {
     return "ey bruder mein kopf macht grad nicht mit, frag nochmal";
   }
 
   grammarTest(raw);
-  const answer = casualify(raw);
+  let answer = casualify(raw);
+  // casualify can strip a response down to nothing (only punctuation/emoji) ->
+  // never reply with an empty string (Discord error 50006 "Cannot send an empty message")
+  if (!answer || !answer.trim()) {
+    answer = "ey bruder mein kopf macht grad nicht mit, frag nochmal";
+  }
   console.log("[finn]", answer);
 
   addHistory(userId, "user", question);
@@ -195,7 +203,7 @@ function isFinnAddressed(text) {
 module.exports = {
   askFinn,
   isFinnAddressed,
-  checkOllamaHealth,
+  checkLLMHealth,
   casualify,
-  callOllama
+  callLLM
 };

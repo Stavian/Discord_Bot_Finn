@@ -1,5 +1,5 @@
-const { CHATTER_CHANCE, CHATTER_COOLDOWN_MS, FINN_SYSTEM_PROMPT } = require("./config");
-const { casualify, callOllama } = require("./ai");
+const { CHATTER_CHANCE, CHATTER_COOLDOWN_MS, buildSystemPrompt } = require("./config");
+const { casualify, callLLM } = require("./ai");
 
 // Per-channel cooldown tracker: channelId → last chatter timestamp
 const cooldowns = new Map();
@@ -46,10 +46,10 @@ async function maybeChatAlong(msg) {
   try {
     const chatterPrompt = buildChatterPrompt(msg.content.slice(0, 200));
     const messages = [
-      { role: "system", content: FINN_SYSTEM_PROMPT },
+      { role: "system", content: buildSystemPrompt() },
       { role: "user", content: chatterPrompt }
     ];
-    const raw = await callOllama(messages);
+    const raw = await callLLM(messages);
     if (!raw) return;
 
     const text = casualify(raw);

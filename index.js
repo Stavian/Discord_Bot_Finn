@@ -2,7 +2,7 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Events, REST, Routes } = require("discord.js");
 
 const { DISCORD_TOKEN, STATUS_CHANNEL_ID, VAGABOT_ID } = require("./src/config");
-const { askFinn, isFinnAddressed, checkOllamaHealth } = require("./src/ai");
+const { askFinn, isFinnAddressed, checkLLMHealth } = require("./src/ai");
 const { extractKeyMemory } = require("./src/memory");
 const { handleVagaBotMessage } = require("./src/reactions");
 const { maybeChatAlong } = require("./src/chatter");
@@ -46,20 +46,20 @@ function sendStatus(text) {
 
 // ================= STARTUP HEALTH CHECK =================
 
-async function waitForOllama(retries = 5, delayMs = 5000) {
+async function waitForLLM(retries = 5, delayMs = 5000) {
   for (let i = 1; i <= retries; i++) {
-    console.log(`[health] Ollama check ${i}/${retries}...`);
-    const ok = await checkOllamaHealth();
+    console.log(`[health] LLM (KoboldCpp) check ${i}/${retries}...`);
+    const ok = await checkLLMHealth();
     if (ok) {
-      console.log("[health] Ollama erreichbar ✓");
+      console.log("[health] LLM erreichbar ✓");
       return true;
     }
     if (i < retries) {
-      console.warn(`[health] Ollama nicht erreichbar, warte ${delayMs / 1000}s...`);
+      console.warn(`[health] LLM nicht erreichbar, warte ${delayMs / 1000}s...`);
       await new Promise(r => setTimeout(r, delayMs));
     }
   }
-  console.error("[health] Ollama nach allen Versuchen nicht erreichbar. Bot startet trotzdem.");
+  console.error("[health] LLM nach allen Versuchen nicht erreichbar. Bot startet trotzdem.");
   return false;
 }
 
@@ -122,10 +122,10 @@ client.once(Events.ClientReady, async () => {
       .catch(err => console.error(`[commands] Fehler in ${guild.name}:`, err.message));
   }
 
-  const ollamaOk = await waitForOllama();
-  const statusText = ollamaOk
-    ? "🤖 Finn Wegbier ist online und Ollama läuft."
-    : "🤖 Finn Wegbier ist online. ⚠️ Ollama nicht erreichbar.";
+  const llmOk = await waitForLLM();
+  const statusText = llmOk
+    ? "🤖 Finn Wegbier ist online und der LLM-Server läuft."
+    : "🤖 Finn Wegbier ist online. ⚠️ LLM-Server nicht erreichbar.";
 
   sendStatus(statusText);
   startContextServer();

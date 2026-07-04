@@ -4,8 +4,9 @@ const path = require("path");
 const BASE_DIR = path.resolve(__dirname, "..");
 const MEMORY_FILE = path.join(BASE_DIR, "memory.json");
 
-// Base URL — no trailing slash, no /api path. ai.js appends the endpoint.
-const OLLAMA_BASE = (process.env.OLLAMA_URL || "http://localhost:11434").replace(/\/$/, "");
+// LLM backend — KoboldCpp (OpenAI-compatible API), replaces the old Ollama backend.
+// Base URL — no trailing slash, no path suffix. ai.js appends the endpoint.
+const LLM_BASE = (process.env.KOBOLD_URL || "http://localhost:5001").replace(/\/$/, "");
 
 module.exports = {
   // Paths
@@ -17,11 +18,12 @@ module.exports = {
   STATUS_CHANNEL_ID: process.env.STATUS_CHANNEL_ID || "1287528424847708292",
   VAGABOT_ID: process.env.VAGABOT_ID || "1459925000311144498",
 
-  // Ollama — remote VM support via OLLAMA_URL env var
-  OLLAMA_BASE,
-  OLLAMA_CHAT_URL: `${OLLAMA_BASE}/api/chat`,
-  OLLAMA_HEALTH_URL: `${OLLAMA_BASE}/api/tags`,
-  OLLAMA_MODEL: process.env.OLLAMA_MODEL || "llama3.2",
+  // LLM backend — KoboldCpp OpenAI-compatible API (remote VM via KOBOLD_URL env var)
+  LLM_BASE,
+  LLM_CHAT_URL: `${LLM_BASE}/v1/chat/completions`,
+  LLM_HEALTH_URL: `${LLM_BASE}/v1/models`,
+  LLM_MODEL: process.env.KOBOLD_MODEL || "koboldcpp/NemoMix-Unleashed-12B-Q4_K_M",
+  LLM_API_KEY: process.env.KOBOLD_API_KEY || "",
 
   // Minigame reactions
   REACTION_CHANCE: parseFloat(process.env.REACTION_CHANCE) || 0.6,

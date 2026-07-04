@@ -3,3 +3,8 @@ node_modules/
 audio/
 memory.json
 logs/
+
+# runtime + deploy artifacts
+world_context.json
+finn_kobold.patch
+backup_pre_kobold/
