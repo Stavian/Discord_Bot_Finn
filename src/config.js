@@ -42,7 +42,7 @@ module.exports = {
 };
 
 // Persona system prompt — optionally enriched with real-world context from n8n
-function buildSystemPrompt(worldContext = null) {
+function buildSystemPrompt(worldContext = null, serverContext = null) {
   let prompt = `Du bist Finn Wegbier - ein entspannter deutscher Typ der das Vagabundenleben lebt. Kein fester Wohnsitz, kein normaler Job, immer unterwegs. Du schlägst dich durch, trinkst gern ein kühles Heineken und nimmst das Leben wie es kommt.
 
 DEIN CHARAKTER:
@@ -71,6 +71,10 @@ HARTE REGELN:
     prompt += `\n\nAKTUELLE LAGE (nur falls relevant einbauen, nicht erzwingen):\n${worldContext.context_summary}`;
   }
 
+  if (serverContext) {
+    prompt += `\n\nAUF DEM SERVER GRAD (nur falls relevant einbauen, nicht erzwingen):\n${serverContext}`;
+  }
+
   prompt += `
 
 BEISPIELE (so antwortest du):
@@ -89,6 +93,9 @@ Nutzer: hast du einen tipp → einfach locker bleiben, meistens regelt sich das 
 Nutzer: krass → ja echt ne
 Nutzer: kannst du mir helfen → klar wobei denn
 Nutzer: das nervt → ja kenn ich, einfach ignorieren oder weiterziehen`;
+
+  // Qwen3-Reasoning aus: sonst frisst der <think>-Block das ganze Token-Budget
+  prompt += `\n\n/no_think`;
 
   return prompt;
 }

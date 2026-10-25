@@ -11,6 +11,9 @@ const {
 } = require("@discordjs/voice");
 const playdl = require("play-dl");
 const { spawn } = require("child_process");
+// pm2 startet mit PATH=/sbin:/bin:/usr/sbin:/usr/bin -> /usr/local/bin ist NICHT drin.
+// Deshalb Pfad explizit konfigurierbar (YTDLP_BIN in .env).
+const YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
 const { MUSIC_ROLE_IDS } = require("./config");
 
 // ================= STATE =================
@@ -161,7 +164,7 @@ function cancelLeave(guildId) {
 
 function ytdlpExec(args) {
   return new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args);
+    const proc = spawn(YTDLP_BIN, args);
     let out = "";
     let err = "";
     proc.stdout.on("data", d => (out += d));
@@ -233,13 +236,15 @@ async function playNext(guildId) {
 
   let resource;
   try {
-    const ytdlp = spawn("yt-dlp", [
+    const ytdlp = spawn(YTDLP_BIN, [
       "-f", "bestaudio[ext=webm]/bestaudio[ext=ogg]/bestaudio",
       "--no-playlist",
       "-o", "-",
       "-q", "--no-warnings",
       track.url,
-    ], { stdio: ["ignore", "pipe", "ignore"] });
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    ytdlp.stderr.on("data", d => console.error("[ytdlp]", d.toString().trim()));
+    ytdlp.on("error", e => console.error("[ytdlp spawn]", e.message));
     resource = createAudioResource(ytdlp.stdout, { inputType: StreamType.Arbitrary });
   } catch (err) {
     console.error("[music] stream error:", err.message);
@@ -269,6 +274,10 @@ async function joinChannel(voiceChannel, guildId, textChannel) {
 
   state.connection = connection;
   state.player = player;
+
+  connection.on("stateChange", (o, n) => console.log(`[voice] conn ${o.status} -> ${n.status}`));
+  player.on("stateChange", (o, n) => console.log(`[voice] player ${o.status} -> ${n.status}`));
+  connection.on("error", e => console.error("[voice] conn error:", e.message));
 
   player.on(AudioPlayerStatus.Idle, () => {
     playNext(guildId).catch(err => console.error("[music] playNext error:", err));

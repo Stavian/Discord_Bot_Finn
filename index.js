@@ -6,6 +6,7 @@ const { askFinn, isFinnAddressed, checkLLMHealth } = require("./src/ai");
 const { extractKeyMemory } = require("./src/memory");
 const { handleVagaBotMessage } = require("./src/reactions");
 const { maybeChatAlong } = require("./src/chatter");
+const { buildServerContext } = require("./src/serverContext");
 const { startContextServer } = require("./src/contextServer");
 
 // ================= SLASH COMMAND DEFINITION =================
@@ -36,6 +37,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildPresences,
   ]
 });
 
@@ -97,7 +99,8 @@ client.on("messageCreate", async msg => {
     extractKeyMemory(text, msg.author.id);
 
     try {
-      const answer = await askFinn(text, msg.author.id);
+      const serverContext = buildServerContext(msg.guild);
+      const answer = await askFinn(text, msg.author.id, serverContext);
       await msg.reply(answer);
     } catch (err) {
       console.error("[main] askFinn error:", err);

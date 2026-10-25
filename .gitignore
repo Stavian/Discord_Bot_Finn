@@ -8,3 +8,6 @@ logs/
 world_context.json
 finn_kobold.patch
 backup_pre_kobold/
+
+# Backups von Fix-Sessions
+*.bak-*

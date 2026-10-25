@@ -120,6 +120,20 @@ function casualify(text) {
 
 // ================= OLLAMA CALL WITH RETRY =================
 
+// ================= THINK-BLOCK FILTER =================
+// Qwen3 ist ein Reasoning-Modell und schreibt <think>...</think> vor die Antwort.
+// Ohne diesen Filter landet das (englische!) Nachdenken direkt im Discord-Chat.
+function stripThink(text) {
+  if (!text) return "";
+  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // Unverschlossener Block = Token-Budget mitten im Denken aufgebraucht,
+  // dahinter steht keine Antwort mehr -> alles ab <think> wegwerfen
+  const open = out.search(/<think>/i);
+  if (open !== -1) out = out.slice(0, open);
+  out = out.replace(/<\/?think>/gi, "");
+  return out.trim();
+}
+
 async function callLLM(messages, retries = 3) {
   const headers = { "Content-Type": "application/json" };
   if (LLM_API_KEY) headers["Authorization"] = `Bearer ${LLM_API_KEY}`;
@@ -134,7 +148,10 @@ async function callLLM(messages, retries = 3) {
           messages,
           stream: false,
           temperature: 0.75,
-          max_tokens: 150,
+          max_tokens: 160,
+          frequency_penalty: 0.7,
+          presence_penalty: 0.3,
+          rep_pen: 1.15,
           stop: ["Nutzer:", "User:", "<|im_end|>", "<|im_start|>", "</s>"]
         })
       });
@@ -144,7 +161,9 @@ async function callLLM(messages, retries = 3) {
       }
 
       const data = await res.json();
-      return (data.choices?.[0]?.message?.content || "").replace(/<\|[^|]*\|>/g, "").replace(/<\/s>/g, "").trim();
+      const content = (data.choices?.[0]?.message?.content || "")
+        .replace(/<\|[^|]*\|>/g, "").replace(/<\/s>/g, "");
+      return stripThink(content);
     } catch (err) {
       console.error(`[llm] attempt ${attempt}/${retries} failed:`, err.message);
       if (attempt < retries) {
@@ -157,13 +176,13 @@ async function callLLM(messages, retries = 3) {
 
 // ================= ASK FINN =================
 
-async function askFinn(question, userId) {
+async function askFinn(question, userId, serverContext = null) {
   const history = getHistoryForChat(userId);
   const worldContext = loadWorldContext();
 
   // Build messages: system + history + new user message
   const messages = [
-    { role: "system", content: buildSystemPrompt(worldContext) },
+    { role: "system", content: buildSystemPrompt(worldContext, serverContext) },
     ...history,
     { role: "user", content: question }
   ];

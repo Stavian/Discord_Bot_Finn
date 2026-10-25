@@ -4,58 +4,78 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Finn Wegbier** - A German-language Discord text-only bot powered by remote Ollama LLM. Features an authentic German vagabond/Tippelbruder persona with Rotwelsch vocabulary, proactive random chatter, persistent user memory, and VagaBot minigame reactions. Deployed in a Proxmox Ubuntu 24.04 LXC container; Ollama runs on a separate VM.
+**Finn Wegbier** — A German-language Discord bot with an authentic German vagabond/Tippelbruder
+persona (Rotwelsch vocabulary), proactive random chatter, persistent user memory, VagaBot
+minigame reactions, live server awareness, and a `/gitarre` music command. Powered by a **remote
+KoboldCpp** LLM server (OpenAI-compatible API). Deployed in a Proxmox Ubuntu 24.04 LXC container;
+KoboldCpp and n8n run on separate hosts.
+
+> State/roadmap: the Obsidian vault note `Projects/Discord Bot.md` is the source of truth for
+> *current state*; this file is the source of truth for *architecture*.
 
 ## Common Commands
 
 ```bash
-# Install dependencies
 npm install
-
-# Development (direct run)
-npm start
-
-# Production (PM2)
-npm run pm2:start
+npm start                 # direct run
+npm run pm2:start         # production (PM2)
 npm run pm2:logs
-npm run pm2:status
 npm run pm2:restart
-npm run pm2:stop
-
-# Required: Ollama running on remote VM at OLLAMA_URL
+# Requires: KoboldCpp reachable at KOBOLD_URL (OpenAI-compatible /v1)
 ```
 
 ## Architecture
 
 ### Modular Structure (src/)
-- **config.js** - Env vars, Ollama URL config, chatter constants, system prompt with injected examples
-- **ai.js** - Ollama `/api/chat` wrapper, retry logic (3x), health check, grammar validation, casualify
-- **memory.js** - Per-user persistent memory (name, city, games, facts), conversation history for `/api/chat`
-- **reactions.js** - VagaBot minigame result parsing and reactions
-- **chatter.js** - Proactive random chatter engine (CHATTER_CHANCE, per-channel cooldown)
+- **config.js** — Env vars, KoboldCpp URL config, chatter constants, `buildSystemPrompt(worldContext, serverContext)`
+- **ai.js** — LLM client: KoboldCpp OpenAI-compatible `/v1/chat/completions`, retry (3x), health check, grammar validation, `casualify`, world-context loading, empty-reply guard
+- **memory.js** — Per-user persistent memory (name, city, games, facts) + conversation history
+- **reactions.js** — VagaBot minigame result parsing and reactions
+- **chatter.js** — Proactive random chatter engine
+- **serverContext.js** — Live server snapshot (who's in voice + what games are played) for the prompt
+- **contextServer.js** — Hardened HTTP server; receives world-context pushes from n8n
 
 ### Entry Point (index.js)
-Slim event router. Startup Ollama health check → Discord login → message routing.
+Slim event router. Startup LLM health check → Discord login → message routing.
+Intents: Guilds, GuildMessages, MessageContent, GuildVoiceStates, **GuildPresences** (privileged — must be enabled in the Discord Developer Portal).
 
 Message routing priority:
 1. VagaBot embeds → `handleVagaBotMessage()`
 2. Bot messages → skip
-3. Directly addressed (mention / wake word) → `askFinn()` + `extractKeyMemory()`
-4. Everything else → `maybeChatAlong()` (proactive chatter, 8% chance, 90s cooldown)
+3. Directly addressed (mention / wake word) → `askFinn(text, userId, serverContext)` + `extractKeyMemory()`
+4. Everything else → `maybeChatAlong()` (proactive chatter)
 
-## Deployment on Ubuntu 24.04 LXC (Proxmox)
+## LLM Backend — KoboldCpp
 
-```bash
-# In the CT:
-git clone <repo>
-cd finn-wegbier
-npm install
-cp .env.example .env
-# Edit .env — set DISCORD_TOKEN and OLLAMA_URL=http://<ollama-vm-ip>:11434
-npm install -g pm2
-pm2 start ecosystem.config.js
-pm2 save && pm2 startup
-```
+Migrated from Ollama (2026-07-05). Uses the **OpenAI-compatible API**:
+- Chat: `POST {KOBOLD_URL}/v1/chat/completions` (messages array; read `choices[0].message.content`)
+- Health/models: `GET {KOBOLD_URL}/v1/models`
+- `KOBOLD_URL` has no trailing slash, no path suffix (default `http://localhost:5001`)
+- Model: `KOBOLD_MODEL` (default `koboldcpp/NemoMix-Unleashed-12B-Q4_K_M`)
+- Optional bearer auth via `KOBOLD_API_KEY`
+- Request tuning: `max_tokens` capped low, `frequency_penalty`/`presence_penalty`/`rep_pen` to keep Finn terse and non-repetitive
+- Stop sequences include `<|im_end|>` etc.; any leaked `<|...|>`/`</s>` tokens are stripped from the reply
+
+## Context System (world + server)
+
+Finn's system prompt is enriched with two optional context blocks (both "only if relevant, don't force"):
+
+**World context (push, via n8n → contextServer):**
+- `src/contextServer.js` runs an HTTP server on `0.0.0.0:${CONTEXT_PORT}` (default 3001).
+  - `POST /context` — n8n pushes `{context_summary, weather, day, headlines, ...}`. Requires header
+    `X-Context-Token: ${CONTEXT_TOKEN}` if the token is set. Validates payload, **atomic write**
+    (temp+rename) to `world_context.json`, **keeps last good** on invalid input, never crashes
+    (every handler in try/catch, 64 KB body cap).
+  - `GET /context` — inspect current context + age. `GET /health` — uptime, last update, age.
+- `ai.js` `loadWorldContext()` reads `world_context.json`, discards if older than
+  `CONTEXT_MAX_AGE_MS` (default 6h), and injects `context_summary` into the prompt.
+- The n8n workflow `Finn_Context` (schedule, every 2h) builds the summary from wttr.in (Köln)
+  weather + Tagesschau RSS and POSTs it here. **Don't break this endpoint contract.**
+
+**Server context (pull, computed in-process):**
+- `src/serverContext.js` `buildServerContext(guild)` returns a short string like
+  `voice: 2 in Zocken | gezockt: 3x arc raiders` from live voice states + presences.
+  Needs the GuildVoiceStates + GuildPresences intents. Returns `null` when nothing notable.
 
 ## Environment Variables (.env)
 
@@ -63,69 +83,47 @@ pm2 save && pm2 startup
 DISCORD_TOKEN=<required>
 STATUS_CHANNEL_ID=<channel_id>
 VAGABOT_ID=<vagabot_client_id>
-OLLAMA_URL=http://192.168.x.x:11434   # Remote Ollama VM IP
-OLLAMA_MODEL=llama3.2
+KOBOLD_URL=http://<kobold-host>:5001     # remote KoboldCpp, OpenAI-compatible
+KOBOLD_MODEL=koboldcpp/NemoMix-Unleashed-12B-Q4_K_M
+KOBOLD_API_KEY=                          # optional bearer, usually empty
+CONTEXT_PORT=3001
+CONTEXT_TOKEN=<shared secret for POST /context>
+CONTEXT_MAX_AGE_MS=21600000              # 6h; world context older than this is ignored
 CHATTER_CHANCE=0.08
 CHATTER_COOLDOWN_MS=90000
 REACTION_CHANCE=0.6
+MUSIC_ROLE_IDS=<comma-separated role ids, empty = everyone>
 ```
 
-## Ollama API
+## Deployment on Ubuntu 24.04 LXC (Proxmox)
 
-Uses `/api/chat` endpoint (message array format), NOT `/api/generate`.
-Health check uses `/api/tags`.
-Base URL set via `OLLAMA_URL` env — no trailing slash, no path suffix.
+Runs at `/opt/finn-wegbier`, PM2 process `FinnWegbier`. `git clone` → `npm install` →
+`cp .env.example .env` (fill in) → `npm install -g pm2` → `pm2 start ecosystem.config.js` →
+`pm2 save && pm2 startup`. KoboldCpp must be reachable at `KOBOLD_URL`.
+
+## Music — /gitarre
+
+`src/music.js` — YouTube playback in a voice channel via **yt-dlp** (spawned; play-dl only
+validates URLs). Slash sub-commands: spiel/stopp/nachste/liste/pause/weiter. Role-gated via
+`MUSIC_ROLE_IDS`. Requires `yt-dlp` installed in the container.
 
 ## Character Persona — Finn Wegbier
 
-Authentic German vagabond (Tippelbruder/Berber). See system prompt in `src/config.js`.
+Authentic German vagabond (Tippelbruder/Berber). System prompt in `src/config.js`.
 
 ### Speech Rules
 - Always lowercase, no ending punctuation
 - Max 2 short sentences, max 250 characters, max 1 emoji
-- German only
-- Uses Rotwelsch vocabulary mixed with street slang
-- Blocks AI/bot-reveal phrases via grammar test in `src/ai.js`
+- German only; Rotwelsch + street slang
+- Never reveal being a bot/AI (blocked via grammar test in `src/ai.js`)
 
-## Proactive Chatter System
+## Subsystems (unchanged)
 
-`src/chatter.js` makes Finn feel like a real Discord member:
-- **CHATTER_CHANCE** (default 8%): random roll per incoming message
-- **CHATTER_COOLDOWN_MS** (default 90s): minimum time between chatter per channel
-- Skips: bots, short messages (<5 chars), commands (! / .), bare URLs
-- 2–5 second natural delay before sending
-- Uses lightweight single-shot prompt (no conversation history)
-
-## VagaBot Integration
-
-`src/reactions.js` watches for VagaBot embed messages.
-- **60% chance** to react to other players' games
-- **Always reacts** when Finn himself was in the game
-- Detects: Coinflip, High-Low, Roulette, Duell
-- Separate message pools for: own win/loss/tie, others win/loss, big amounts (>500)
-
-## Memory System
-
-`src/memory.js` — persisted to `memory.json` (history is RAM-only).
-Regex extraction: name, city, games, hobbies, age.
-History format: messages array compatible with `/api/chat`.
-
-## Grammar Validation
-
-`grammarTest()` in `src/ai.js`:
-1. No uppercase letters
-2. No ending punctuation
-3. Max 2 sentences
-4. Max 1 emoji
-5. No formal/bot-reveal phrases
-6. Max 250 characters
-7. No English phrases
-
-`casualify()` post-processes responses to enforce these rules.
-
-## Wake Word Detection
-
-`isFinnAddressed()` in `src/ai.js`:
-- Matches "finn", "fynn", "fin" at word boundary
-- Excludes false positives: "final", "befinden", "finden", "findest", "finalist"
-- Also triggers on `@mention`
+- **Proactive chatter** (`src/chatter.js`): CHATTER_CHANCE (8%) roll per message, per-channel
+  cooldown, skips bots/short/commands/bare-URLs, 2–5 s natural delay, single-shot prompt.
+- **VagaBot integration** (`src/reactions.js`): reacts to Coinflip/High-Low/Roulette/Duell embeds.
+- **Memory** (`src/memory.js`): regex extraction (name/city/games/hobbies/age) → `memory.json`;
+  history is RAM-only.
+- **Grammar validation** (`grammarTest`) + **casualify** in `src/ai.js` enforce the speech rules.
+- **Wake word** (`isFinnAddressed`): matches finn/fynn/fin at word boundary, excludes false
+  positives (final/befinden/finden/…), also triggers on @mention.
