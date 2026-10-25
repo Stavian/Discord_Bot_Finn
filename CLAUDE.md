@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Finn Wegbier** — A German-language Discord bot with an authentic German vagabond/Tippelbruder
 persona (Rotwelsch vocabulary), proactive random chatter, persistent user memory, VagaBot
 minigame reactions, live server awareness, and a `/gitarre` music command. Powered by a **remote
-KoboldCpp** LLM server (OpenAI-compatible API). Deployed in a Proxmox Ubuntu 24.04 LXC container;
+KoboldCpp** LLM server (OpenAI-compatible API). Deployed in a Proxmox Ubuntu 22.04 LXC container (CT105, verified 2026-10-25);
 KoboldCpp and n8n run on separate hosts.
 
 > State/roadmap: the Obsidian vault note `Projects/Discord Bot.md` is the source of truth for
@@ -51,9 +51,19 @@ Migrated from Ollama (2026-07-05). Uses the **OpenAI-compatible API**:
 - Chat: `POST {KOBOLD_URL}/v1/chat/completions` (messages array; read `choices[0].message.content`)
 - Health/models: `GET {KOBOLD_URL}/v1/models`
 - `KOBOLD_URL` has no trailing slash, no path suffix (default `http://localhost:5001`)
-- Model: `KOBOLD_MODEL` (default `koboldcpp/NemoMix-Unleashed-12B-Q4_K_M`)
+- Model: `KOBOLD_MODEL` — send the exact **router config name** (`qwen3-14b.kcpps`), not the
+  display name; KoboldCpp runs in router mode and loads that model on demand (~20-30 s on first
+  request after a swap). Currently served: Qwen3-14B-abliterated.
 - Optional bearer auth via `KOBOLD_API_KEY`
-- Request tuning: `max_tokens` capped low, `frequency_penalty`/`presence_penalty`/`rep_pen` to keep Finn terse and non-repetitive
+- Request tuning: `max_tokens: 160`, `frequency_penalty`/`presence_penalty`/`rep_pen` to keep
+  Finn terse and non-repetitive
+- **Qwen3 is a reasoning model.** It emits `<think>...</think>` before the answer. Two guards,
+  keep both: `/no_think` at the end of the system prompt (`buildSystemPrompt`) so it does not
+  reason at all, and `stripThink()` in `ai.js` which removes think blocks from the reply. An
+  *unclosed* block means the token budget ran out mid-reasoning — there is no answer behind it,
+  so everything from `<think>` on is dropped and the empty-guard fallback fires.
+  Do **not** lower `max_tokens` below ~120: with 80 the think block ate the whole budget and Finn
+  posted his English reasoning into Discord (bug 2026-08..10, fixed 2026-10-25).
 - Stop sequences include `<|im_end|>` etc.; any leaked `<|...|>`/`</s>` tokens are stripped from the reply
 
 ## Context System (world + server)
@@ -84,7 +94,7 @@ DISCORD_TOKEN=<required>
 STATUS_CHANNEL_ID=<channel_id>
 VAGABOT_ID=<vagabot_client_id>
 KOBOLD_URL=http://<kobold-host>:5001     # remote KoboldCpp, OpenAI-compatible
-KOBOLD_MODEL=koboldcpp/NemoMix-Unleashed-12B-Q4_K_M
+KOBOLD_MODEL=qwen3-14b.kcpps             # exact router config name, not the display name
 KOBOLD_API_KEY=                          # optional bearer, usually empty
 CONTEXT_PORT=3001
 CONTEXT_TOKEN=<shared secret for POST /context>
@@ -93,9 +103,10 @@ CHATTER_CHANCE=0.08
 CHATTER_COOLDOWN_MS=90000
 REACTION_CHANCE=0.6
 MUSIC_ROLE_IDS=<comma-separated role ids, empty = everyone>
+YTDLP_BIN=/usr/local/bin/yt-dlp           # absolute path - see Music section
 ```
 
-## Deployment on Ubuntu 24.04 LXC (Proxmox)
+## Deployment on Ubuntu 22.04 LXC (Proxmox, CT105)
 
 Runs at `/opt/finn-wegbier`, PM2 process `FinnWegbier`. `git clone` → `npm install` →
 `cp .env.example .env` (fill in) → `npm install -g pm2` → `pm2 start ecosystem.config.js` →
@@ -105,7 +116,32 @@ Runs at `/opt/finn-wegbier`, PM2 process `FinnWegbier`. `git clone` → `npm ins
 
 `src/music.js` — YouTube playback in a voice channel via **yt-dlp** (spawned; play-dl only
 validates URLs). Slash sub-commands: spiel/stopp/nachste/liste/pause/weiter. Role-gated via
-`MUSIC_ROLE_IDS`. Requires `yt-dlp` installed in the container.
+`MUSIC_ROLE_IDS`.
+
+**yt-dlp must be installed in the container — this is the usual cause of a dead `/gitarre`.**
+PM2 starts with `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, so `/usr/local/bin` is *not* on the path
+and a plain `spawn("yt-dlp")` fails with `ENOENT` even when `which yt-dlp` works in your shell.
+Therefore the binary is resolved via `YTDLP_BIN` (absolute path, set in `.env`).
+
+```bash
+curl -sL -o /usr/local/bin/yt-dlp \
+  https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
+chmod a+rx /usr/local/bin/yt-dlp && ln -sf /usr/local/bin/yt-dlp /usr/bin/yt-dlp
+```
+
+YouTube also needs a **JS runtime** now; without it yt-dlp warns about deprecated extraction and
+some formats go missing. Install deno and symlink it into the PM2 path as well:
+
+```bash
+curl -sL -o /tmp/deno.zip \
+  https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip
+unzip -o /tmp/deno.zip -d /usr/local/bin && ln -sf /usr/local/bin/deno /usr/bin/deno
+```
+
+Installed on CT105 2026-10-25: yt-dlp 2026.10.21, deno 2.9.8. `ffmpeg` is in `/bin`.
+Voice needs `libsodium-wrappers` + `@discordjs/voice` >= 0.19 (`tweetnacl` alone cannot do
+Discord's current AEAD encryption — that was the silent-playback bug of 2026-07-05).
+`joinChannel()` keeps `[voice]` state logs on purpose; they are what made that bug findable.
 
 ## Character Persona — Finn Wegbier
 
